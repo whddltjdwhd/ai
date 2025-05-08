@@ -124,7 +124,25 @@ class P2():
         return any(all(p[dim] == line_pieces[0][dim] for p in line_pieces)
                   for dim in range(4))
     
-    def check_win(self, board, pieces):
+    def check_2x2_subgrid_win(self, board: List[List[int]], pieces: List[Tuple]) -> bool:
+        """2x2 부분 격자의 승리 여부 확인"""
+        for r in range(3):  # 0, 1, 2
+            for c in range(3):  # 0, 1, 2
+                subgrid_indices = [board[r][c], board[r][c+1], 
+                                 board[r+1][c], board[r+1][c+1]]
+                
+                # 2x2 칸이 모두 채워져 있는지 확인
+                if 0 not in subgrid_indices:
+                    subgrid_pieces = [pieces[idx-1] for idx in subgrid_indices]
+                    
+                    # 4가지 속성 중 하나라도 모두 같은지 확인
+                    for dim in range(4):  # 0:I/E, 1:N/S, 2:T/F, 3:P/J
+                        if all(p[dim] == subgrid_pieces[0][dim] for p in subgrid_pieces):
+                            return True  # 승리 조건 만족
+        
+        return False  # 2x2 승리 조건 불만족
+    
+    def check_win(self, board: List[List[int]], pieces: List[Tuple]) -> bool:
         """승리 조건 검사"""
         # 가로 라인
         for row in board:
@@ -140,6 +158,10 @@ class P2():
         diag1 = [board[i][i] for i in range(4)]
         diag2 = [board[i][3-i] for i in range(4)]
         if self.check_line(diag1, pieces) or self.check_line(diag2, pieces):
+            return True
+        
+        # 2x2 부분 격자 검사
+        if self.check_2x2_subgrid_win(board, pieces):
             return True
         
         return False

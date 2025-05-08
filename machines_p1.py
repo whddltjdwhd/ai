@@ -91,10 +91,10 @@ class Node:
 
 class P1:
     def __init__(self, board, available_pieces):
-        self.board = board
-        self.available_pieces = available_pieces
         self.pieces = [(i, j, k, l) for i in range(2) for j in range(2) 
                       for k in range(2) for l in range(2)]  # 전체 16개 조각
+        self.board = board
+        self.available_pieces = available_pieces
         self.time_limit = 0.45  # 각 턴당 0.45초 사용
     
     def get_piece_from_index(self, index: int, pieces: List[Tuple]) -> Optional[Tuple]:
@@ -143,6 +143,24 @@ class P1:
         line_pieces = [self.get_piece_from_index(idx, pieces) for idx in line]
         return any(self.check_line_attributes(line_pieces, dim) for dim in range(4))
     
+    def check_2x2_subgrid_win(self, board: List[List[int]], pieces: List[Tuple]) -> bool:
+        """2x2 부분 격자의 승리 여부 확인"""
+        for r in range(3):  # 0, 1, 2
+            for c in range(3):  # 0, 1, 2
+                subgrid_indices = [board[r][c], board[r][c+1], 
+                                 board[r+1][c], board[r+1][c+1]]
+                
+                # 2x2 칸이 모두 채워져 있는지 확인
+                if 0 not in subgrid_indices:
+                    subgrid_pieces = [self.get_piece_from_index(idx, pieces) for idx in subgrid_indices]
+                    
+                    # 4가지 속성 중 하나라도 모두 같은지 확인
+                    for dim in range(4):  # 0:I/E, 1:N/S, 2:T/F, 3:P/J
+                        if self.check_line_attributes(subgrid_pieces, dim):
+                            return True  # 승리 조건 만족
+        
+        return False  # 2x2 승리 조건 불만족
+    
     def check_win(self, board: List[List[int]], pieces: List[Tuple]) -> bool:
         """승리 조건 검사"""
         # 가로 라인
@@ -159,6 +177,10 @@ class P1:
         diag1 = [board[i][i] for i in range(4)]
         diag2 = [board[i][3-i] for i in range(4)]
         if self.check_line(diag1, pieces) or self.check_line(diag2, pieces):
+            return True
+        
+        # 2x2 부분 격자 검사
+        if self.check_2x2_subgrid_win(board, pieces):
             return True
         
         return False
