@@ -41,8 +41,7 @@ class MCTSNode:
             filled = [cell for cell in line if cell]
             if len(filled) >= 2:
                 traits = [MCTSNode._decode_piece(cell) for cell in filled]
-                if any(all(t[i] == traits[0][i] for t in traits)
-                       for i in range(4)):
+                if any(all(t[i] == traits[0][i] for t in traits) for i in range(4)):
                     score += 0.2
         return score
 
@@ -50,7 +49,7 @@ class MCTSNode:
     @lru_cache(maxsize=16384)
     def _opponent_can_win_cached(
         board_key: Tuple[Tuple[int, ...], ...],
-        piece: Tuple[int, int, int, int]
+        piece: Tuple[int,int,int,int]
     ) -> bool:
         """
         Fast check if opponent can win by placing `piece` anywhere.
@@ -90,93 +89,44 @@ class MCTSNode:
         self.untried_actions = actions
 
     def _get_actions(self) -> List[Any]:
-        """
-        Returns available actions: piece selections or board placements.
-        """
         if self.is_terminal():
             return []
         if self.player_phase == 'select':
             return list(self.available_pieces)
-        return [
-            (r, c)
-            for r, c in product(range(4), range(4))
-            if self.board[r][c] == 0
-        ]
+        return [(r, c) for r, c in product(range(4), range(4)) if self.board[r][c] == 0]
 
     def is_terminal(self) -> bool:
-        """
-        Checks for terminal state: winning or full board with no pieces.
-        """
         if MCTSNode._check_win(self.board):
             return True
         if not self.available_pieces:
-            return all(
-                cell != 0
-                for row in self.board
-                for cell in row
-            )
+            return all(cell != 0 for row in self.board for cell in row)
         return False
 
-    def uct_score(
-        self,
-        total_visits: int,
-        exploration: float,
-        heuristic_weight: float
-    ) -> float:
-        """
-        Calculates UCT score for child selection.
-        """
+    def uct_score(self, total_visits: int, exploration: float, heuristic_weight: float) -> float:
         if self.visits == 0:
             return float('inf')
         exploitation = self.wins / self.visits
-        exploration_term = exploration * math.sqrt(
-            math.log(total_visits) / self.visits
-        )
+        exploration_term = exploration * math.sqrt(math.log(total_visits) / self.visits)
         return exploitation + exploration_term + heuristic_weight * self.heuristic
 
     def expand(self) -> 'MCTSNode':
-        """
-        Expands one untried action, returns the new child node.
-        """
         action = self.untried_actions.pop(0)
         next_board, next_avail, next_phase, next_piece = self._apply_action(action)
-        child = MCTSNode(
-            next_board,
-            next_avail,
-            next_phase,
-            selected_piece=next_piece,
-            parent=self
-        )
+        child = MCTSNode(next_board, next_avail, next_phase, selected_piece=next_piece, parent=self)
         self.children.append(child)
         return child
 
-    def best_child(
-        self,
-        exploration: float,
-        heuristic_weight: float
-    ) -> 'MCTSNode':
-        """
-        Selects the best child by UCT score.
-        """
+    def best_child(self, exploration: float, heuristic_weight: float) -> 'MCTSNode':
         total = sum(child.visits for child in self.children) or 1
-        return max(
-            self.children,
-            key=lambda c: c.uct_score(total, exploration, heuristic_weight)
-        )
+        return max(self.children, key=lambda c: c.uct_score(total, exploration, heuristic_weight))
 
     def backpropagate(self, result: float):
-        """
-        Backpropagates simulation result up the tree.
-        """
         self.visits += 1
         self.wins += result
         if self.parent:
             self.parent.backpropagate(result)
 
     def simulate(self) -> float:
-        """
-        Runs a biased random simulation from this node.
-        """
         board_state = [row.copy() for row in self.board]
         pieces_left = self.available_pieces.copy()
         phase = self.player_phase
@@ -198,50 +148,22 @@ class MCTSNode:
                 return 0.5  # draw
 
             if phase == 'select':
-                # weighted piece selection
-                safe_pieces = [
-                    p for p in pieces_left
-                    if not MCTSNode._opponent_can_win_cached(
-                        tuple(tuple(r) for r in board_state), p
-                    )
-                ]
+                safe_pieces = [p for p in pieces_left if not MCTSNode._opponent_can_win_cached(tuple(tuple(r) for r in board_state), p)]
                 choices = safe_pieces or pieces_left
-                weights = [
-                    1.0 + self._calculate_piece_value(board_state, p)
-                    for p in choices
-                ]
+                weights = [1.0 + 0 for _ in choices]
                 choice = random.choices(choices, weights, k=1)[0]
                 pieces_left.remove(choice)
                 current_piece = choice
                 phase = 'place'
             else:
-                # weighted placement
-                empties = [
-                    (r, c)
-                    for r, c in product(range(4), range(4))
-                    if board_state[r][c] == 0
-                ]
-                weights = []
-                for (r, c) in empties:
-                    w = 1.0
-                    if (r, c) in [(1,1),(1,2),(2,1),(2,2)]:
-                        w += 0.5
-                    if self._can_form_line(board_state, r, c, current_piece):
-                        w += 1.0
-                    weights.append(w)
-                r, c = random.choices(empties, weights, k=1)[0]
+                empties = [(r, c) for r, c in product(range(4), range(4)) if board_state[r][c] == 0]
+                r, c = random.choice(empties)
                 board_state[r][c] = MCTSNode._encode_piece(current_piece)
                 phase = 'select'
 
-        return 0.5  # max depth reached
+        return 0.5
 
-    def _apply_action(
-        self,
-        action: Any
-    ) -> Tuple[List[List[int]], List[Tuple[int,int,int,int]], str, Optional[Tuple[int,int,int,int]]]:
-        """
-        Applies an action, returning new state and next phase.
-        """
+    def _apply_action(self, action: Any) -> Tuple[List[List[int]], List[Tuple[int,int,int,int]], str, Optional[Tuple[int,int,int,int]]]:
         new_board = [row.copy() for row in self.board]
         new_avail = self.available_pieces.copy()
         if self.player_phase == 'select':
@@ -253,9 +175,6 @@ class MCTSNode:
 
     @staticmethod
     def _all_lines(board: List[List[int]]) -> List[List[int]]:
-        """
-        Returns all rows, columns, and diagonals of the 4x4 board.
-        """
         lines: List[List[int]] = []
         for i in range(4):
             lines.append([board[i][j] for j in range(4)])
@@ -266,25 +185,16 @@ class MCTSNode:
 
     @staticmethod
     def _check_win(board: List[List[int]]) -> bool:
-        """
-        Checks for any winning line or 2x2 block.
-        """
-        # lines
         for line in MCTSNode._all_lines(board):
             if 0 not in line:
                 traits = [MCTSNode._decode_piece(v) for v in line]
-                if any(all(t[i] == traits[0][i] for t in traits) for i in range(4)):
-                    return True
-        # 2x2 blocks
+                if any(all(t[i] == traits[0][i] for t in traits) for i in range(4)): return True
         for r in range(3):
             for c in range(3):
-                block = [
-                    board[r][c], board[r][c+1], board[r+1][c], board[r+1][c+1]
-                ]
+                block = [board[r][c], board[r][c+1], board[r+1][c], board[r+1][c+1]]
                 if 0 not in block:
                     traits = [MCTSNode._decode_piece(v) for v in block]
-                    if any(all(t[i] == traits[0][i] for t in traits) for i in range(4)):
-                        return True
+                    if any(all(t[i] == traits[0][i] for t in traits) for i in range(4)): return True
         return False
 
     @staticmethod
@@ -298,57 +208,69 @@ class MCTSNode:
 
 class P1:
     """
-    MCTS-based player with parallel search and risk avoidance.
+    MCTS-based player with enhanced strategy feedback applied.
     """
     MAX_TURN_TIME = 10
-    ITERATION_CAP = 3000
+    ITERATION_CAP = 2300
 
     def __init__(
         self,
         board: List[List[int]],
         available_pieces: List[Tuple[int,int,int,int]]
     ):
-        self.exploration_base = 1.5
-        self.heuristic_weight_base = 0.3
+        # Determine first/second player
+        is_first = len(available_pieces) % 2 == 0
+        self.exploration_base = 1.4 if is_first else 1.6
+        self.heuristic_weight_base = 0.35 if is_first else 0.25
+        # Adjust for game stage
         self._adjust_parameters(board)
         self.root = MCTSNode(board, available_pieces, 'select')
-        self.last_search_iterations = 0  # 속성 초기화 추가
+        self.last_search_iterations = 0
 
     def _adjust_parameters(self, board: List[List[int]]):
         empty = sum(cell == 0 for row in board for cell in row)
-    
-        # 게임 단계에 따라 다른 전략 사용
-        if empty >= 12:  # 초기 게임
-            self.exploration = self.exploration_base * 1.2  # 더 많은 탐색
+        if empty >= 12:
+            self.exploration = self.exploration_base * 1.2
             self.heuristic_weight = self.heuristic_weight_base * 0.8
-        elif empty >= 6:  # 중기 게임
+        elif empty >= 6:
             self.exploration = self.exploration_base
             self.heuristic_weight = self.heuristic_weight_base * 1.2
-        else:  # 후기 게임
-            self.exploration = self.exploration_base * 0.7  # 덜 탐색, 더 활용
+        else:
+            self.exploration = self.exploration_base * 0.7
             self.heuristic_weight = self.heuristic_weight_base * 1.5
 
+    def _danger_level(self, pos: Tuple[int,int], piece: Tuple[int,int,int,int]) -> int:
+        # Evaluate risk if piece placed at pos
+        board_copy = [row.copy() for row in self.root.board]
+        board_copy[pos[0]][pos[1]] = MCTSNode._encode_piece(piece)
+        key = tuple(tuple(r) for r in board_copy)
+        for p in self.root.available_pieces:
+            if p != piece and MCTSNode._opponent_can_win_cached(key, p):
+                return 3
+        return 0
+
+    def _iterate(self):
+        node = self.root
+        # Selection
+        while not node.untried_actions and node.children:
+            node = node.best_child(self.exploration, self.heuristic_weight)
+        # Expansion
+        if node.untried_actions:
+            node = node.expand()
+        # Simulation & Backpropagation
+        result = node.simulate()
+        node.backpropagate(result)
+
     def _search(self):
-        """
-        Parallel MCTS search using small batches and FIRST_COMPLETED wait.
-        Records actual iterations performed.
-        """
         iterations = 0
         end_time = time.time() + P1.MAX_TURN_TIME * 0.9
-        # 추천 변경
-        batch_size = min(20, P1.ITERATION_CAP - iterations)  # 더 큰 배치 크기
-        with ThreadPoolExecutor(max_workers=6) as executor:  # 더 많은 작업자
+        batch = min(20, P1.ITERATION_CAP)
+        with ThreadPoolExecutor(max_workers=6) as executor:
             while time.time() < end_time and iterations < P1.ITERATION_CAP:
                 remaining = end_time - time.time()
-                if remaining <= 0:
-                    break
-                cb = min(batch_size, P1.ITERATION_CAP - iterations)
+                cb = min(batch, P1.ITERATION_CAP - iterations)
                 futures = [executor.submit(self._iterate) for _ in range(cb)]
-                done, _ = wait(
-                    futures,
-                    timeout=min(0.05, remaining),
-                    return_when=FIRST_COMPLETED
-                )
+                done, _ = wait(futures, timeout=min(0.05, remaining), return_when=FIRST_COMPLETED)
                 for f in done:
                     try:
                         f.result()
@@ -357,108 +279,54 @@ class P1:
                         pass
         self.last_search_iterations = iterations
 
-    def _iterate(self):
-        node = self.root
-        # selection
-        while not node.untried_actions and node.children:
-            node = node.best_child(self.exploration, self.heuristic_weight)
-        # expansion
-        if node.untried_actions:
-            node = node.expand()
-        # simulation & backpropagation
-        result = node.simulate()
-        node.backpropagate(result)
-
     def select_piece(self) -> Tuple[int,int,int,int]:
-        """
-        Chooses a piece to hand over to opponent.
-        """
+        empty = sum(cell == 0 for row in self.root.board for cell in row)
+        # Early game: danger-based selection
+        if empty >= 12:
+            empties = [(r, c) for r, c in product(range(4), range(4)) if self.root.board[r][c] == 0]
+            danger_scores = {p: max(self._danger_level(e, p) for e in empties) for p in self.root.available_pieces}
+            return min(self.root.available_pieces, key=lambda p: danger_scores[p])
+        # Mid/late game: MCTS
         self._search()
         if not self.root.children:
-            choice = random.choice(self.root.available_pieces)
-        else:
-            best = max(self.root.children, key=lambda c: c.visits)
-            self.root = best
-            choice = best.selected_piece
+            return random.choice(self.root.available_pieces)
+        best = max(self.root.children, key=lambda c: c.visits)
+        self.root = best
+        choice = best.selected_piece
         print(f"SELECT_PIECE -> {choice}, iters={self.last_search_iterations}")
         return choice
 
-    def place_piece(
-        self,
-        piece: Tuple[int,int,int,int]
-    ) -> Tuple[int,int]:
-        """
-        Places the given piece on board, preferring winning or safe moves.
-        """
-        # immediate win
+    def place_piece(self, piece: Tuple[int,int,int,int]) -> Tuple[int,int]:
+        # Immediate win if available
         for r, c in product(range(4), range(4)):
             if self.root.board[r][c] == 0:
-                board_copy = [row.copy() for row in self.root.board]
-                board_copy[r][c] = MCTSNode._encode_piece(piece)
-                if MCTSNode._check_win(board_copy):
+                temp = [row.copy() for row in self.root.board]
+                temp[r][c] = MCTSNode._encode_piece(piece)
+                if MCTSNode._check_win(temp):
                     print(f"PLACE_PIECE -> ({r},{c}), iters={self.last_search_iterations}")
                     return (r, c)
-        # identify dangerous spots
-        danger = []
-        for r, c in product(range(4), range(4)):
-            if self.root.board[r][c] == 0:
-                board_copy = [row.copy() for row in self.root.board]
-                board_copy[r][c] = MCTSNode._encode_piece(piece)
-                key2 = tuple(tuple(row) for row in board_copy)
-                if any(
-                    p != piece and MCTSNode._opponent_can_win_cached(key2, p)
-                    for p in self.root.available_pieces
-                ):
-                    danger.append((r, c))
-        # reuse or reset
-        for ch in self.root.children:
-            if ch.selected_piece == piece:
-                ch.parent = None
-                self.root = ch
-                break
-        else:
-            self.root = MCTSNode(
-                self.root.board,
-                self.root.available_pieces,
-                'place',
-                selected_piece=piece
-            )
+        # Identify dangerous spots
+        danger_spots = [(r, c) for r, c in product(range(4), range(4)) if self.root.board[r][c]==0 and self._danger_level((r,c), piece)>0]
+        # Search
         self._search()
-        # choose best safe move
+        # No children: pick safe or first empty
         if not self.root.children:
-            empties = [
-                (r, c)
-                for r, c in product(range(4), range(4))
-                if self.root.board[r][c] == 0
-            ]
-            safe = [pos for pos in empties if pos not in danger]
+            empties = [(r,c) for r,c in product(range(4), range(4)) if self.root.board[r][c]==0]
+            safe = [e for e in empties if e not in danger_spots]
             choice = safe[0] if safe else empties[0]
-        else:
-            best = max(self.root.children, key=lambda c: c.visits)
-            candidate = next(
-                (
-                    pos for pos in product(range(4), range(4))
-                    if self.root.board[pos[0]][pos[1]] == 0 and best.board[pos[0]][pos[1]] != 0
-                ),
-                (0, 0)
-            )
-            if candidate in danger and len(self.root.children) > 1:
-                second = sorted(self.root.children, key=lambda c: c.visits)[-2]
-                alt = next(
-                    (
-                        pos for pos in product(range(4), range(4))
-                        if self.root.board[pos[0]][pos[1]] == 0
-                        and second.board[pos[0]][pos[1]] != 0
-                        and pos not in danger
-                    ),
-                    candidate
-                )
-                choice = alt
-            else:
-                choice = candidate
-        print(f"PLACE_PIECE -> {choice}, iters={self.last_search_iterations}")
-        return choice
+            print(f"PLACE_PIECE -> {choice}, iters={self.last_search_iterations}")
+            return choice
+        # Use child visitation to pick move not in danger
+        best = max(self.root.children, key=lambda c: c.visits)
+        for r, c in product(range(4), range(4)):
+            if best.board[r][c]!=self.root.board[r][c] and self.root.board[r][c]==0 and (r,c) not in danger_spots:
+                print(f"PLACE_PIECE -> ({r},{c}), iters={self.last_search_iterations}")
+                return (r, c)
+        # Fallback
+        fallback = next((e for e in product(range(4), range(4)) if self.root.board[e[0]][e[1]]==0), (0, 0))
+        print(f"PLACE_PIECE -> {fallback}, iters={self.last_search_iterations}")
+        return fallback
 
     def record_game(self, won: bool):
-        """Placeholder for recording game outcome."""
+        # Placeholder for recording outcome
         pass
