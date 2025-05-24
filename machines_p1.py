@@ -182,7 +182,7 @@ class MCTSNode:
         phase = self.player_phase
         current_piece = self.selected_piece
 
-        for _ in range(100):
+        for _ in range(200):
             # immediate win check
             for p in pieces_left:
                 for r, c in product(range(4), range(4)):
@@ -300,24 +300,33 @@ class P1:
     """
     MCTS-based player with parallel search and risk avoidance.
     """
-    MAX_TURN_TIME = 5
-    ITERATION_CAP = 500
+    MAX_TURN_TIME = 10
+    ITERATION_CAP = 3000
 
     def __init__(
         self,
         board: List[List[int]],
         available_pieces: List[Tuple[int,int,int,int]]
     ):
-        self.exploration_base = 1.4
-        self.heuristic_weight_base = 0.6
+        self.exploration_base = 1.5
+        self.heuristic_weight_base = 0.3
         self._adjust_parameters(board)
         self.root = MCTSNode(board, available_pieces, 'select')
+        self.last_search_iterations = 0  # 속성 초기화 추가
 
     def _adjust_parameters(self, board: List[List[int]]):
         empty = sum(cell == 0 for row in board for cell in row)
-        progress = 1.0 - (empty / 16.0)
-        self.exploration = self.exploration_base * (1.0 - 0.3 * progress)
-        self.heuristic_weight = self.heuristic_weight_base * (1.0 + 0.5 * progress)
+    
+        # 게임 단계에 따라 다른 전략 사용
+        if empty >= 12:  # 초기 게임
+            self.exploration = self.exploration_base * 1.2  # 더 많은 탐색
+            self.heuristic_weight = self.heuristic_weight_base * 0.8
+        elif empty >= 6:  # 중기 게임
+            self.exploration = self.exploration_base
+            self.heuristic_weight = self.heuristic_weight_base * 1.2
+        else:  # 후기 게임
+            self.exploration = self.exploration_base * 0.7  # 덜 탐색, 더 활용
+            self.heuristic_weight = self.heuristic_weight_base * 1.5
 
     def _search(self):
         """
@@ -326,8 +335,9 @@ class P1:
         """
         iterations = 0
         end_time = time.time() + P1.MAX_TURN_TIME * 0.9
-        batch_size = 10
-        with ThreadPoolExecutor(max_workers=4) as executor:
+        # 추천 변경
+        batch_size = min(20, P1.ITERATION_CAP - iterations)  # 더 큰 배치 크기
+        with ThreadPoolExecutor(max_workers=6) as executor:  # 더 많은 작업자
             while time.time() < end_time and iterations < P1.ITERATION_CAP:
                 remaining = end_time - time.time()
                 if remaining <= 0:
