@@ -2,11 +2,11 @@ import random
 import math
 import time
 import pickle
+import os
 from itertools import product
 from functools import lru_cache
 from concurrent.futures import ThreadPoolExecutor, wait, FIRST_COMPLETED
-from typing import List, Tuple, Optional, Any
-
+from typing import List, Tuple, Optional, Any, Dict
 
 class MCTSNode:
     """
@@ -23,9 +23,12 @@ class MCTSNode:
     
     # 시뮬레이션 깊이 설정 (동적으로 조정 가능)
     SIMULATION_DEPTH = 200
+    
+    # 위험도 캐싱
+    danger_cache = {}
 
     @staticmethod
-    @lru_cache(maxsize=8192)
+    @lru_cache(maxsize=16384)
     def _evaluate_state(
         board_key: Tuple[Tuple[int, ...], ...],
         avail_key: Tuple[Tuple[int, int, int, int], ...]
@@ -37,32 +40,36 @@ class MCTSNode:
         board = [list(row) for row in board_key]
         score = 0.0
         
-        # 중앙 위치 가중치
-        for r, c in [(1,1),(1,2),(2,1),(2,2)]:
-            if board[r][c] == 0:
-                score += 0.1
-        
-        # 각 속성별(I/E, N/S, T/F, P/J) 분석 추가
+        # 1. 각 속성별(I/E, N/S, T/F, P/J) 분석
         for attr_idx in range(4):
             # 각 라인에서 속성 일치 체크
             for line in MCTSNode._all_lines(board):
                 attr_counts = [0, 0]  # [0속성 개수, 1속성 개수]
                 empty_count = 0
-                for val in line:
+                empty_pos = None
+                
+                for pos, val in enumerate(line):
                     if val == 0:
                         empty_count += 1
+                        empty_pos = pos
                     else:
                         piece = MCTSNode._decode_piece(val)
                         attr_counts[piece[attr_idx]] += 1
                 
-                # 3개 같은 속성이 있고 1개 빈칸 - 잠재적 승리 가능성
-                if empty_count == 1 and (attr_counts[0] == 3 or attr_counts[1] == 3):
-                    score += 0.3
-                # 2개 같은 속성이 있고 2개 빈칸 - 잠재적 가능성
-                elif empty_count == 2 and (attr_counts[0] == 2 or attr_counts[1] == 2):
-                    score += 0.1
+                # 3개 같은 속성이 있고 1개 빈칸 - 매우 높은 점수
+                if empty_count == 1:
+                    if attr_counts[0] == 3:
+                        score += 0.5  # 매우 중요한 패턴
+                    elif attr_counts[1] == 3:
+                        score += 0.5
+                # 2개 같은 속성이 있고 2개 빈칸 - 잠재적 패턴
+                elif empty_count == 2:
+                    if attr_counts[0] == 2:
+                        score += 0.2
+                    elif attr_counts[1] == 2:
+                        score += 0.2
         
-        # 2x2 블록 분석 추가
+        # 2. 2x2 블록 승리 패턴 분석
         for r in range(3):
             for c in range(3):
                 for attr_idx in range(4):
@@ -72,6 +79,7 @@ class MCTSNode:
                     ]
                     attr_counts = [0, 0]
                     empty_count = 0
+                    
                     for val in block:
                         if val == 0:
                             empty_count += 1
@@ -79,28 +87,36 @@ class MCTSNode:
                             piece = MCTSNode._decode_piece(val)
                             attr_counts[piece[attr_idx]] += 1
                     
-                    # 3개 같은 속성이 있고 1개 빈칸
-                    if empty_count == 1 and (attr_counts[0] == 3 or attr_counts[1] == 3):
-                        score += 0.25
+                    # 3개 같은 속성이 있고 1개 빈칸 - 높은 점수
+                    if empty_count == 1:
+                        if attr_counts[0] == 3 or attr_counts[1] == 3:
+                            score += 0.4
+                    # 2개 같은 속성, 2개 빈칸 - 중간 점수
+                    elif empty_count == 2:
+                        if attr_counts[0] == 2 or attr_counts[1] == 2:
+                            score += 0.15
         
-        # 기존 점수 반영
-        for line in MCTSNode._all_lines(board):
-            filled = [cell for cell in line if cell]
-            if len(filled) >= 2:
-                traits = [MCTSNode._decode_piece(cell) for cell in filled]
-                if any(all(t[i] == traits[0][i] for t in traits) for i in range(4)):
-                    score += 0.2
+        # 3. 중앙 위치 가중치 (기본적인 전략)
+        center_control = 0
+        for r, c in [(1,1), (1,2), (2,1), (2,2)]:
+            if board[r][c] != 0:
+                center_control += 1
+        score += center_control * 0.05  # 중앙 통제는 소폭 점수 부여
         
         return score
 
     @staticmethod
-    @lru_cache(maxsize=16384)
+    @lru_cache(maxsize=32768)
     def _opponent_can_win_cached(
         board_key: Tuple[Tuple[int, ...], ...],
         piece: Tuple[int, int, int, int]
-    ) -> bool:
+    ) -> int:
         """
         Fast check if opponent can win by placing `piece` anywhere.
+        Returns:
+            0: 안전함
+            1: 승리 가능
+            2: 양방 3목 가능 (더 위험)
         """
         board = [list(row) for row in board_key]
         encoded_piece = MCTSNode._encode_piece(piece)
@@ -113,47 +129,19 @@ class MCTSNode:
                 
                 # 승리 체크
                 if MCTSNode._check_win(board):
-                    # 복원
                     board[r][c] = 0
-                    return True
+                    return 1
                     
-                # 양방 3목 체크 (더 위험한 상황)
-                fork_count = 0
-                for attr_idx in range(4):
-                    # 가로줄 체크
-                    row_match = all(board[r][i] != 0 and MCTSNode._decode_piece(board[r][i])[attr_idx] == 
-                                   piece[attr_idx] for i in range(4))
-                    if row_match:
-                        fork_count += 1
-                    
-                    # 세로줄 체크
-                    col_match = all(board[i][c] != 0 and MCTSNode._decode_piece(board[i][c])[attr_idx] == 
-                                   piece[attr_idx] for i in range(4))
-                    if col_match:
-                        fork_count += 1
-                    
-                    # 대각선 체크 (해당되는 경우만)
-                    if r == c:
-                        diag_match = all(board[i][i] != 0 and MCTSNode._decode_piece(board[i][i])[attr_idx] == 
-                                        piece[attr_idx] for i in range(4))
-                        if diag_match:
-                            fork_count += 1
-                            
-                    if r + c == 3:
-                        anti_diag_match = all(board[i][3-i] != 0 and MCTSNode._decode_piece(board[i][3-i])[attr_idx] == 
-                                             piece[attr_idx] for i in range(4))
-                        if anti_diag_match:
-                            fork_count += 1
-                
-                # 여러 승리 경로가 있으면 양방 3목으로 판단
+                # 양방 3목 체크
+                fork_count = MCTSNode._check_fork_opportunities(board, r, c, piece)
                 if fork_count >= 2:
                     board[r][c] = 0
-                    return True
+                    return 2
                 
                 # 복원
                 board[r][c] = 0
         
-        return False
+        return 0
 
     def __init__(
         self,
@@ -247,13 +235,26 @@ class MCTSNode:
             if phase == 'select':
                 # 안전한 피스 선택 (양방 3목 방지)
                 board_key = tuple(tuple(r) for r in board_copy)
-                safe = [p for p in pieces if not MCTSNode._opponent_can_win_cached(board_key, p)]
                 
-                # 안전한 피스가 없으면 기존 피스 중에서 선택
-                if not safe and pieces:
-                    choice = random.choice(pieces)
-                elif safe:
-                    choice = random.choice(safe)
+                # 위험도에 따라 피스 정렬 (안전한 것 우선)
+                piece_dangers = []
+                for p in pieces:
+                    danger = MCTSNode._opponent_can_win_cached(board_key, p)
+                    piece_dangers.append((p, danger))
+                
+                # 안전한 피스 필터링
+                safe_pieces = [p for p, danger in piece_dangers if danger == 0]
+                
+                if safe_pieces:
+                    # 안전한 피스 중 속성 패턴이 좋은 것 선택
+                    choice = random.choice(safe_pieces)
+                elif pieces:
+                    # 모든 피스가 위험하면, 덜 위험한 것 선택
+                    less_dangerous = [p for p, danger in piece_dangers if danger == 1]
+                    if less_dangerous:
+                        choice = random.choice(less_dangerous)
+                    else:
+                        choice = random.choice(pieces)
                 else:
                     return 0.5  # 더 이상 선택할 피스 없음
                     
@@ -261,17 +262,18 @@ class MCTSNode:
                 current = choice
                 phase = 'place'
             else:  # phase == 'place'
-                # 양방 3목 기회 찾기
                 empties = [(r, c) for r, c in product(range(4), range(4)) if board_copy[r][c] == 0]
                 if not empties:
                     return 0.5  # 더 이상 둘 곳 없음
-                    
-                # 승리 가능한 위치 찾기
+                
+                # 1. 즉시 승리 가능한 위치 찾기
                 winning_moves = []
                 fork_moves = []
                 
                 for r, c in empties:
                     board_copy[r][c] = MCTSNode._encode_piece(current)
+                    
+                    # 승리 체크
                     if MCTSNode._check_win(board_copy):
                         winning_moves.append((r, c))
                     else:
@@ -279,15 +281,35 @@ class MCTSNode:
                         fork_count = MCTSNode._check_fork_opportunities(board_copy, r, c, current)
                         if fork_count >= 2:
                             fork_moves.append((r, c))
+                    
                     board_copy[r][c] = 0  # 복원
                 
-                if winning_moves:
+                # 2. 최적의 수 선택
+                if winning_moves:  # 승리 위치
                     r, c = random.choice(winning_moves)
-                elif fork_moves:
+                elif fork_moves:   # 양방 3목 위치
                     r, c = random.choice(fork_moves)
-                else:
-                    r, c = random.choice(empties)
+                else:  # 기본 선택 - 중앙 선호
+                    central = []
+                    corners = []
+                    others = []
                     
+                    for pos in empties:
+                        r, c = pos
+                        if (r, c) in [(1,1), (1,2), (2,1), (2,2)]:
+                            central.append(pos)
+                        elif (r, c) in [(0,0), (0,3), (3,0), (3,3)]:
+                            corners.append(pos)
+                        else:
+                            others.append(pos)
+                    
+                    if central:
+                        r, c = random.choice(central)
+                    elif corners:
+                        r, c = random.choice(corners)
+                    else:
+                        r, c = random.choice(others)
+                
                 board_copy[r][c] = MCTSNode._encode_piece(current)
                 phase = 'select'
         
@@ -301,49 +323,119 @@ class MCTSNode:
     def _check_fork_opportunities(board: List[List[int]], row: int, col: int, piece: Tuple[int, int, int, int]) -> int:
         """위치에 피스를 놓았을 때 생기는 양방 3목 기회 계산"""
         potential_wins = 0
+        encoded_piece = MCTSNode._encode_piece(piece)
+        
+        # 1. 속성별로 승리 라인 체크
         for attr_idx in range(4):
-            for line_type in ['row', 'col', 'diag']:
-                if line_type == 'row':
-                    line = [board[row][c] for c in range(4)]
-                elif line_type == 'col':
-                    line = [board[r][col] for r in range(4)]
-                elif line_type == 'diag' and row == col:  # 주대각선
-                    line = [board[i][i] for i in range(4)]
-                elif line_type == 'diag' and row + col == 3:  # 부대각선
-                    line = [board[i][3-i] for i in range(4)]
-                else:
-                    continue
-                    
-                # 해당 라인이 특정 속성에서 3개 일치하는지 확인
-                if 0 not in line:  # 라인에 빈칸이 없어야 함
-                    pieces = []
-                    for val in line:
-                        if val != 0:
-                            pieces.append(MCTSNode._decode_piece(val))
-                    
-                    if all(p[attr_idx] == pieces[0][attr_idx] for p in pieces):
+            # 행 체크
+            row_pieces = [board[row][c] for c in range(4)]
+            if row_pieces.count(0) == 0:  # 모두 채워진 경우
+                row_attr_match = True
+                for val in row_pieces:
+                    if val != encoded_piece:
+                        decoded = MCTSNode._decode_piece(val)
+                        if decoded[attr_idx] != piece[attr_idx]:
+                            row_attr_match = False
+                            break
+                if row_attr_match:
+                    potential_wins += 1
+            
+            # 열 체크
+            col_pieces = [board[r][col] for r in range(4)]
+            if col_pieces.count(0) == 0:  # 모두 채워진 경우
+                col_attr_match = True
+                for val in col_pieces:
+                    if val != encoded_piece:
+                        decoded = MCTSNode._decode_piece(val)
+                        if decoded[attr_idx] != piece[attr_idx]:
+                            col_attr_match = False
+                            break
+                if col_attr_match:
+                    potential_wins += 1
+            
+            # 대각선 체크 (해당되는 경우만)
+            if row == col:  # 주 대각선
+                diag_pieces = [board[i][i] for i in range(4)]
+                if diag_pieces.count(0) == 0:
+                    diag_attr_match = True
+                    for val in diag_pieces:
+                        if val != encoded_piece:
+                            decoded = MCTSNode._decode_piece(val)
+                            if decoded[attr_idx] != piece[attr_idx]:
+                                diag_attr_match = False
+                                break
+                    if diag_attr_match:
+                        potential_wins += 1
+            
+            if row + col == 3:  # 반대 대각선
+                anti_diag_pieces = [board[i][3-i] for i in range(4)]
+                if anti_diag_pieces.count(0) == 0:
+                    anti_diag_attr_match = True
+                    for val in anti_diag_pieces:
+                        if val != encoded_piece:
+                            decoded = MCTSNode._decode_piece(val)
+                            if decoded[attr_idx] != piece[attr_idx]:
+                                anti_diag_attr_match = False
+                                break
+                    if anti_diag_attr_match:
                         potential_wins += 1
         
-        # 2x2 블록 체크
-        if 1 <= row <= 2 and 1 <= col <= 2:
-            for r_offset in [-1, 0]:
-                for c_offset in [-1, 0]:
-                    if 0 <= row+r_offset <= 2 and 0 <= col+c_offset <= 2:
-                        block = [
-                            board[row+r_offset][col+c_offset], 
-                            board[row+r_offset][col+c_offset+1],
-                            board[row+r_offset+1][col+c_offset], 
-                            board[row+r_offset+1][col+c_offset+1]
-                        ]
-                        if 0 not in block:
-                            for attr_idx in range(4):
-                                pieces = []
-                                for val in block:
-                                    if val != 0:
-                                        pieces.append(MCTSNode._decode_piece(val))
-                                
-                                if all(p[attr_idx] == pieces[0][attr_idx] for p in pieces):
-                                    potential_wins += 1
+        # 2. 2x2 블록 승리 체크
+        if 0 <= row <= 2 and 0 <= col <= 2:  # 왼쪽 상단 블록
+            block = [board[row][col], board[row][col+1], board[row+1][col], board[row+1][col+1]]
+            if 0 not in block:
+                for attr_idx in range(4):
+                    attr_match = True
+                    for val in block:
+                        if val != encoded_piece:
+                            decoded = MCTSNode._decode_piece(val)
+                            if decoded[attr_idx] != piece[attr_idx]:
+                                attr_match = False
+                                break
+                    if attr_match:
+                        potential_wins += 1
+        
+        if 0 <= row-1 and row <= 3 and 0 <= col <= 2:  # 오른쪽 상단 블록
+            block = [board[row-1][col], board[row-1][col+1], board[row][col], board[row][col+1]]
+            if 0 not in block:
+                for attr_idx in range(4):
+                    attr_match = True
+                    for val in block:
+                        if val != encoded_piece:
+                            decoded = MCTSNode._decode_piece(val)
+                            if decoded[attr_idx] != piece[attr_idx]:
+                                attr_match = False
+                                break
+                    if attr_match:
+                        potential_wins += 1
+        
+        if 0 <= row <= 2 and 0 <= col-1 and col <= 3:  # 왼쪽 하단 블록
+            block = [board[row][col-1], board[row][col], board[row+1][col-1], board[row+1][col]]
+            if 0 not in block:
+                for attr_idx in range(4):
+                    attr_match = True
+                    for val in block:
+                        if val != encoded_piece:
+                            decoded = MCTSNode._decode_piece(val)
+                            if decoded[attr_idx] != piece[attr_idx]:
+                                attr_match = False
+                                break
+                    if attr_match:
+                        potential_wins += 1
+        
+        if 0 <= row-1 and row <= 3 and 0 <= col-1 and col <= 3:  # 오른쪽 하단 블록
+            block = [board[row-1][col-1], board[row-1][col], board[row][col-1], board[row][col]]
+            if 0 not in block:
+                for attr_idx in range(4):
+                    attr_match = True
+                    for val in block:
+                        if val != encoded_piece:
+                            decoded = MCTSNode._decode_piece(val)
+                            if decoded[attr_idx] != piece[attr_idx]:
+                                attr_match = False
+                                break
+                    if attr_match:
+                        potential_wins += 1
         
         return potential_wins
 
@@ -359,323 +451,575 @@ class MCTSNode:
 
     @staticmethod
     def _all_lines(board: List[List[int]]) -> List[List[int]]:
+        """모든 승리 가능 라인 반환 (가로, 세로, 대각선)"""
         lines: List[List[int]] = []
+        # 가로줄
         for i in range(4):
             lines.append([board[i][j] for j in range(4)])
+        # 세로줄
+        for i in range(4):
             lines.append([board[j][i] for j in range(4)])
+        # 주대각선
         lines.append([board[i][i] for i in range(4)])
+        # 반대각선
         lines.append([board[i][3-i] for i in range(4)])
         return lines
 
     @staticmethod
     def _check_win(board: List[List[int]]) -> bool:
+        """승리 조건 체크 (4개 일치 또는 2x2 블록 일치)"""
+        # 모든 라인 체크
         for line in MCTSNode._all_lines(board):
-            if 0 not in line:
+            if 0 not in line:  # 빈칸 없이 채워진 경우만
                 traits = [MCTSNode._decode_piece(v) for v in line]
-                if any(all(t[i] == traits[0][i] for t in traits) for i in range(4)): return True
+                # 4개 속성 중 하나라도 모두 일치하면 승리
+                if any(all(t[i] == traits[0][i] for t in traits) for i in range(4)):
+                    return True
+        
+        # 2x2 블록 체크
         for r in range(3):
             for c in range(3):
                 block = [board[r][c], board[r][c+1], board[r+1][c], board[r+1][c+1]]
-                if 0 not in block:
+                if 0 not in block:  # 빈칸 없이 채워진 경우만
                     traits = [MCTSNode._decode_piece(v) for v in block]
-                    if any(all(t[i] == traits[0][i] for t in traits) for i in range(4)): return True
+                    # 4개 속성 중 하나라도 모두 일치하면 승리
+                    if any(all(t[i] == traits[0][i] for t in traits) for i in range(4)):
+                        return True
         return False
 
     @staticmethod
     def _encode_piece(piece: Tuple[int,int,int,int]) -> int:
+        """피스 인코딩 (튜플 → 정수)"""
         return MCTSNode.pieces.index(piece) + 1
 
     @staticmethod
     def _decode_piece(val: int) -> Tuple[int,int,int,int]:
+        """피스 디코딩 (정수 → 튜플)"""
         return MCTSNode.pieces[val-1]
+
+    @staticmethod
+    def _get_mbti_name(piece: Tuple[int,int,int,int]) -> str:
+        """피스를 MBTI 형식으로 표현"""
+        return f"{'I' if piece[0] == 0 else 'E'}{'N' if piece[1] == 0 else 'S'}{'T' if piece[2] == 0 else 'F'}{'P' if piece[3] == 0 else 'J'}"
 
 
 class P1:
     """
-    MCTS-based player with enhanced strategy feedback applied.
+    MCTS-based player with enhanced strategy against P2's approach.
     """
-    MAX_TURN_TIME = 10
-    ITERATION_CAP = 2000
+    MAX_TURN_TIME = 10  # 최대 턴 시간 (초)
+    ITERATION_CAP = 3000  # 최대 반복 횟수
     
-    # 게임 기록 관리를 위한 변수 추가
-    move_history = []
-    win_patterns = {}
-
+    # 게임 기록 관리를 위한 변수
+    _instance_move_history = []  # 인스턴스별 기록
+    _global_win_patterns = {}    # 전역 승리 패턴
+    
+    # 디버깅 모드를 클래스 변수로 설정
+    debug = True
+    
     def __init__(
         self,
         board: List[List[int]],
         available_pieces: List[Tuple[int,int,int,int]]
     ):
-        # Determine first/second player
-        is_first = len(available_pieces) % 2 == 0
-        self.exploration_base = 1.4 if is_first else 1.6
-        self.heuristic_weight_base = 0.35 if is_first else 0.25
+        # 게임 상태 초기화
+        self.board = [row.copy() for row in board]
+        self.available_pieces = available_pieces.copy()
+        
+        # 선공/후공 판단 및 기본 파라미터 설정
+        self.is_first = len(available_pieces) % 2 == 0
+        self.exploration_base = 1.6 if self.is_first else 1.8
+        self.heuristic_weight_base = 0.4 if self.is_first else 0.3
+        
+        # 인스턴스 변수 초기화
+        self.move_history = []
         
         # 학습된 패턴 로드
         self._load_patterns()
         
-        # Adjust for game stage
+        # 게임 단계에 따른 파라미터 조정
         self._adjust_params(board)
+        
+        # MCTS 루트 노드 초기화
         self.root = MCTSNode(board, available_pieces, 'select')
+        
+        # 탐색 통계
         self.last_search_iterations = 0
+        self.last_search_time = 0
+        
+        # 디버깅 모드 - 인스턴스마다 개별 설정 가능하도록 유지
+        # self.debug = True  # 이 줄을 주석 처리
+        
+        # 랜덤 시드 설정 (재현 가능한 결과)
+        random.seed(42)
 
     def _adjust_params(self, board: List[List[int]]):
+        """게임 단계별 탐색 파라미터 조정"""
         empty = sum(cell == 0 for row in board for cell in row)
         
-        # 게임 초반 (16-12 빈칸)
+        # 게임 초반 (16-12 빈칸) - 다양한 가능성 탐색
         if empty >= 12:
-            self.exploration = self.exploration_base * 1.2
-            self.heuristic_weight = self.heuristic_weight_base * 0.8
-            MCTSNode.SIMULATION_DEPTH = 100  # 초반에는 다양하게 탐색
-            
-        # 게임 중반 (11-6 빈칸)
+            self.exploration = self.exploration_base * 1.5
+            self.heuristic_weight = self.heuristic_weight_base * 0.7
+            MCTSNode.SIMULATION_DEPTH = 150
+        
+        # 게임 중반 (11-6 빈칸) - 균형적 탐색
         elif empty >= 6:
-            self.exploration = self.exploration_base
-            self.heuristic_weight = self.heuristic_weight_base * 1.2
-            MCTSNode.SIMULATION_DEPTH = 200  # 중반에는 균형있게 탐색
-            
-        # 게임 후반 (5-0 빈칸)
+            self.exploration = self.exploration_base * 1.0
+            self.heuristic_weight = self.heuristic_weight_base * 1.3
+            MCTSNode.SIMULATION_DEPTH = 250
+        
+        # 게임 후반 (5-0 빈칸) - 전술적 탐색
         else:
-            self.exploration = self.exploration_base * 0.7
-            self.heuristic_weight = self.heuristic_weight_base * 1.5
-            MCTSNode.SIMULATION_DEPTH = 300  # 후반에는 깊게 탐색하여 승리 기회 포착
+            self.exploration = self.exploration_base * 0.6
+            self.heuristic_weight = self.heuristic_weight_base * 1.8
+            MCTSNode.SIMULATION_DEPTH = 350
 
     def _danger_level(self, pos: Tuple[int,int], piece: Tuple[int,int,int,int]) -> int:
-        # Evaluate risk if piece placed at pos
-        board_copy = [row.copy() for row in self.root.board]
+        """위치에 피스를 놓았을 때의 위험도 평가"""
+        # 캐싱 키
+        cache_key = (pos, piece, tuple(tuple(r) for r in self.board))
+        if cache_key in MCTSNode.danger_cache:
+            return MCTSNode.danger_cache[cache_key]
+        
+        # 보드 복사 및 피스 배치
+        board_copy = [row.copy() for row in self.board]
         board_copy[pos[0]][pos[1]] = MCTSNode._encode_piece(piece)
-        key = tuple(tuple(r) for r in board_copy)
         
-        # 양방 3목 체크
-        fork_count = MCTSNode._check_fork_opportunities(board_copy, pos[0], pos[1], piece)
-        if fork_count >= 2:
-            return 5  # 양방 3목은 가장 위험
+        danger_level = 0
         
-        # 피스 위험도 체크
-        for p in self.root.available_pieces:
-            if p != piece and MCTSNode._opponent_can_win_cached(key, p):
-                return 3
-                
-        return 0
+        # 1. 직접적인 승리 가능성 체크
+        if MCTSNode._check_win(board_copy):
+            danger_level = 10  # 즉시 승리
+        else:
+            # 2. 양방 3목 체크 (가장 위험)
+            fork_count = MCTSNode._check_fork_opportunities(board_copy, pos[0], pos[1], piece)
+            if fork_count >= 2:
+                danger_level = 8  # 매우 위험 (양방 3목)
+            elif fork_count == 1:
+                danger_level = 5  # 위험 (한 방향 3목)
+            
+            # 3. 다음 턴에 상대가 위험한 피스를 얻을 수 있는지
+            board_key = tuple(tuple(r) for r in board_copy)
+            for p in self.available_pieces:
+                if p != piece:
+                    risk = MCTSNode._opponent_can_win_cached(board_key, p)
+                    if risk == 2:  # 양방 3목 가능
+                        danger_level = max(danger_level, 7)
+                    elif risk == 1:  # 승리 가능
+                        danger_level = max(danger_level, 3)
+        
+        # 캐싱
+        MCTSNode.danger_cache[cache_key] = danger_level
+        return danger_level
 
     def _iterate(self):
+        """MCTS 한 번의 반복(선택-확장-시뮬레이션-역전파)"""
         node = self.root
-        # Selection
+        
+        # 1. 선택: 리프 노드나 확장 가능한 노드를 찾을 때까지 트리 탐색
         while not node.untried_actions and node.children:
             node = node.best_child(self.exploration, self.heuristic_weight)
-        # Expansion
+        
+        # 2. 확장: 시도하지 않은 액션이 있으면 확장
         if node.untried_actions:
             node = node.expand()
-        # Simulation & Backpropagation
+        
+        # 3. 시뮬레이션: 무작위 플레이아웃으로 결과 추정
         result = node.simulate()
+        
+        # 4. 역전파: 결과를 루트까지 전파
         node.backpropagate(result)
 
     def _search(self):
-        end_time = time.time() + self.MAX_TURN_TIME * 0.95
+        """MCTS 메인 탐색 루프"""
+        start_time = time.time()
+        end_time = start_time + self.MAX_TURN_TIME * 0.95  # 시간 제한의 95%만 사용
         iters = 0
         future_results = []
         
-        # 초기에 더 많은 스레드로 탐색 시작
-        with ThreadPoolExecutor(max_workers=8) as executor:
+        # CPU 코어 수에 맞게 작업자 수 조정
+        num_workers = min(8, os.cpu_count() or 4)
+        batch_size = 16  # 배치 크기
+        
+        # 병렬 탐색 실행
+        with ThreadPoolExecutor(max_workers=num_workers) as executor:
             while time.time() < end_time and iters < self.ITERATION_CAP:
-                # 배치 단위로 작업 제출 (CPU 코어별 최적화)
-                batch_size = 32  # 한 번에 제출할 작업 개수
-                new_futures = [executor.submit(self._iterate) for _ in range(batch_size)]
+                # 배치로 작업 제출
+                new_futures = []
+                for _ in range(batch_size):
+                    if time.time() >= end_time or iters >= self.ITERATION_CAP:
+                        break
+                    new_futures.append(executor.submit(self._iterate))
+                
                 future_results.extend(new_futures)
                 
-                # 완료된 작업 확인 및 카운트
-                done, _ = wait(future_results, timeout=0.01)
+                # 완료된 작업 확인
+                done, not_done = wait(
+                    future_results, 
+                    timeout=0.01, 
+                    return_when=FIRST_COMPLETED
+                )
+                
+                # 완료된 작업 처리
                 for future in done:
                     future_results.remove(future)
                     try:
-                        future.result()
+                        future.result()  # 예외 체크
                         iters += 1
-                    except:
-                        pass
+                    except Exception as e:
+                        if self.debug:
+                            print(f"탐색 오류: {str(e)}")
                 
-                # 일정 간격으로 가장 유망한 경로에 집중
-                if iters % 200 == 0 and self.root.children:
-                    # 가장 많이 방문된 자식 노드를 새로운 루트로 설정
-                    best_child = max(self.root.children, key=lambda c: c.visits)
-                    if best_child.visits > self.root.visits * 0.5:  # 충분히 유망한 경우만
-                        self.root = best_child
+                # 일정 간격으로 가장 유망한 자식 노드로 집중
+                if iters % 200 == 0 and self.root.children and iters > 0:
+                    best_children = sorted(
+                        self.root.children, 
+                        key=lambda c: c.visits, 
+                        reverse=True
+                    )[:3]  # 상위 3개 노드
+                    
+                    if best_children and best_children[0].visits > self.root.visits * 0.4:
+                        if self.debug:
+                            print(f"탐색 집중: {best_children[0].visits}회 방문한 노드로 집중")
+                        self.root = best_children[0]
                 
+        # 탐색 통계 업데이트
         self.last_search_iterations = iters
-
-    def _analyze_opponent_trends(self, board, available_pieces):
-        """P2의 전략 경향을 분석하여 대응"""
-        # P2가 MBTI 기반 접근법을 사용한다고 가정하고 대응
+        self.last_search_time = time.time() - start_time
         
-        # 속성별 분포 분석
+        if self.debug:
+            print(f"MCTS 탐색 완료: {iters}회 반복, {self.last_search_time:.2f}초 소요")
+
+    def _analyze_opponent_trends(self) -> List[Tuple[Optional[int], float]]:
+        """상대방 전략 경향 분석"""
+        # MBTI 속성별 분포 분석
         attr_distribution = []
-        for i in range(4):  # 각 속성별
+        
+        for i in range(4):  # 각 속성별 (I/E, N/S, T/F, P/J)
             zeros = sum(1 for r in range(4) for c in range(4) 
-                       if board[r][c] != 0 and MCTSNode._decode_piece(board[r][c])[i] == 0)
-            ones = sum(1 for r in range(4) for c in range(4) 
-                      if board[r][c] != 0 and MCTSNode._decode_piece(board[r][c])[i] == 1)
+                      if self.board[r][c] != 0 and 
+                      MCTSNode._decode_piece(self.board[r][c])[i] == 0)
             
-            # P2가 선호하는 속성 파악
-            if zeros > ones + 1:
-                # 0속성(I/N/T/P) 선호 경향
-                attr_distribution.append((0, 0.7))
-            elif ones > zeros + 1:
-                # 1속성(E/S/F/J) 선호 경향
-                attr_distribution.append((1, 0.7))
-            else:
-                # 뚜렷한 선호 없음
-                attr_distribution.append((None, 0.5))
+            ones = sum(1 for r in range(4) for c in range(4) 
+                     if self.board[r][c] != 0 and 
+                     MCTSNode._decode_piece(self.board[r][c])[i] == 1)
+            
+            # 뚜렷한 선호 경향이 있는지 확인
+            if zeros > ones + 2:  # 0속성(I/N/T/P) 선호
+                attr_distribution.append((0, 0.8))
+            elif ones > zeros + 2:  # 1속성(E/S/F/J) 선호
+                attr_distribution.append((1, 0.8))
+            elif zeros > ones:  # 약한 0속성 선호
+                attr_distribution.append((0, 0.4))
+            elif ones > zeros:  # 약한 1속성 선호
+                attr_distribution.append((1, 0.4))
+            else:  # 선호 불명확
+                attr_distribution.append((None, 0.0))
         
         return attr_distribution
 
-    def _adjust_children_by_trends(self, attr_distribution):
-        """상대방 경향에 따른 자식 노드 조정"""
+    def _adjust_children_by_trends(self, attr_distribution: List[Tuple[Optional[int], float]]):
+        """상대방 경향에 따른 자식 노드 평가 조정"""
         if not self.root.children:
             return
-            
+        
         for child in self.root.children:
             piece = child.selected_piece
             if piece:
-                # P2가 선호하는 속성의 피스에 패널티
+                # 상대가 선호하는 속성의 피스에 패널티
+                trend_penalty = 0.0
                 for i, (preferred, weight) in enumerate(attr_distribution):
                     if preferred is not None and piece[i] == preferred:
-                        child.heuristic -= 0.1 * weight
+                        trend_penalty += 0.15 * weight
+                
+                # 패널티 적용
+                if trend_penalty > 0:
+                    child.heuristic -= trend_penalty
+                    if self.debug and trend_penalty > 0.2:
+                        print(f"상대 선호 속성 패널티: {MCTSNode._get_mbti_name(piece)}, -{trend_penalty:.2f}")
 
-    def _check_fork_opportunities(self, board: List[List[int]], pos: Tuple[int, int], piece: Tuple[int, int, int, int]) -> bool:
-        """위치에 피스를 놓았을 때 양방 3목 기회가 있는지 확인"""
-        board_copy = [row.copy() for row in board]
+    def _check_fork_opportunities(self, pos: Tuple[int, int], piece: Tuple[int, int, int, int]) -> bool:
+        """위치에 피스를 놓았을 때 양방 3목 기회 여부"""
+        board_copy = [row.copy() for row in self.board]
         board_copy[pos[0]][pos[1]] = MCTSNode._encode_piece(piece)
         
-        fork_count = MCTSNode._check_fork_opportunities(board_copy, pos[0], pos[1], piece)
-        return fork_count >= 2
+        # 양방 3목 체크 (2개 이상이면 양방 3목)
+        return MCTSNode._check_fork_opportunities(board_copy, pos[0], pos[1], piece) >= 2
+
+    def _find_winning_pattern(self) -> Optional[int]:
+        """보드에서 승리에 가까운 패턴 찾기"""
+        # 1. 완성 가능한 라인 찾기
+        for attr_idx in range(4):  # 각 속성별
+            for line_type, indices in [
+                ('row', [(r, c) for r in range(4) for c in range(4)]),
+                ('col', [(r, c) for c in range(4) for r in range(4)]),
+                ('diag', [(i, i) for i in range(4)]),
+                ('anti_diag', [(i, 3-i) for i in range(4)])
+            ]:
+                # 해당 라인의 피스들
+                pieces = []
+                empty_count = 0
+                empty_pos = None
+                
+                for r, c in indices:
+                    if self.board[r][c] == 0:
+                        empty_count += 1
+                        empty_pos = (r, c)
+                    else:
+                        pieces.append(MCTSNode._decode_piece(self.board[r][c]))
+                
+                # 한 칸만 비어있고 나머지가 같은 속성을 가진 경우
+                if empty_count == 1 and pieces:
+                    if all(p[attr_idx] == pieces[0][attr_idx] for p in pieces):
+                        return attr_idx
+        
+        # 2. 완성 가능한 2x2 블록 찾기
+        for r in range(3):
+            for c in range(3):
+                for attr_idx in range(4):
+                    block = [
+                        (r, c), (r, c+1),
+                        (r+1, c), (r+1, c+1)
+                    ]
+                    
+                    pieces = []
+                    empty_count = 0
+                    empty_pos = None
+                    
+                    for pos_r, pos_c in block:
+                        if self.board[pos_r][pos_c] == 0:
+                            empty_count += 1
+                            empty_pos = (pos_r, pos_c)
+                        else:
+                            pieces.append(MCTSNode._decode_piece(self.board[pos_r][pos_c]))
+                    
+                    # 한 칸만 비어있고 나머지가 같은 속성을 가진 경우
+                    if empty_count == 1 and pieces:
+                        if all(p[attr_idx] == pieces[0][attr_idx] for p in pieces):
+                            return attr_idx
+        
+        return None
 
     def select_piece(self) -> Tuple[int,int,int,int]:
-        empty = sum(cell == 0 for row in self.root.board for cell in row)
+        """상대에게 줄 피스 선택"""
+        # 디버깅 모드면 정보 출력
+        if self.debug:
+            print("\n===== 피스 선택 단계 =====")
+            print(f"남은 피스: {len(self.available_pieces)}")
+            print(f"보드 상태: {sum(1 for r in range(4) for c in range(4) if self.board[r][c] != 0)}/16칸 배치됨")
         
-        # 상대 전략 분석
-        attr_distribution = self._analyze_opponent_trends(self.root.board, self.root.available_pieces)
+        # 게임 단계에 따른 파라미터 조정
+        self._adjust_params(self.board)
         
-        # Early game: danger-based selection with attribute analysis
-        if empty >= 12:
-            empties = [(r, c) for r, c in product(range(4), range(4)) if self.root.board[r][c] == 0]
-            # 피스별 위험도 평가
+        # 상대방 전략 경향 분석
+        attr_distribution = self._analyze_opponent_trends()
+        
+        # 빈 칸 수 계산
+        empty = sum(cell == 0 for row in self.board for cell in row)
+        
+        # 승리 패턴 찾기
+        winning_attr = self._find_winning_pattern()
+        
+        # 초기 게임: 위험도 기반 선택 (MCTS 없이 빠른 계산)
+        if empty >= 14:  # 2개 이하 피스만 놓인 상태
+            empties = [(r, c) for r, c in product(range(4), range(4)) if self.board[r][c] == 0]
             danger_scores = {}
-            for p in self.root.available_pieces:
+            
+            # 각 피스의 위험도 계산
+            for p in self.available_pieces:
                 # 기본 위험도
                 danger = max(self._danger_level(e, p) for e in empties)
                 
-                # 학습된 패턴 기반 가중치 조정
+                # 학습된 패턴 기반 조정
                 pattern_key = self._encode_pattern(p)
-                if pattern_key in self.win_patterns:
-                    danger -= min(self.win_patterns[pattern_key] * 0.1, 1)  # 승패 기록 반영
+                if pattern_key in self._global_win_patterns:
+                    win_ratio = self._global_win_patterns[pattern_key] / (self._global_win_patterns.get(f"total:{pattern_key}", 1) or 1)
+                    danger -= min(win_ratio * 2.0, 2.0)
                 
-                # 상대 선호 속성과 일치하는 경우 위험도 증가
+                # 상대 선호 속성 기반 조정
                 for i, (preferred, weight) in enumerate(attr_distribution):
                     if preferred is not None and p[i] == preferred:
-                        danger += 1 * weight
-                        
-                danger_scores[p] = danger
+                        danger += 1.5 * weight
                 
-            return min(self.root.available_pieces, key=lambda p: danger_scores[p])
+                # 승리 패턴 기반 조정
+                if winning_attr is not None and p[winning_attr] == 0:  # 승리 패턴에 맞는 속성
+                    danger += 3.0
+                
+                danger_scores[p] = danger
             
-        # Mid/late game: MCTS with enhanced analysis
+            if self.debug:
+                # 위험도 상위 3개 피스 출력
+                top_dangers = sorted(danger_scores.items(), key=lambda x: x[1], reverse=True)[:3]
+                print("위험한 피스 TOP3:")
+                for p, score in top_dangers:
+                    print(f"  {MCTSNode._get_mbti_name(p)}: {score:.2f}")
+            
+            # 가장 안전한 피스 선택
+            choice = min(self.available_pieces, key=lambda p: danger_scores[p])
+            
+            if self.debug:
+                print(f"선택된 피스: {MCTSNode._get_mbti_name(choice)} (위험도: {danger_scores[choice]:.2f})")
+            
+            # 선택 기록
+            self.move_history.append(choice)
+            return choice
+        
+        # 중후반 게임: MCTS 탐색
         self._search()
         
+        # 자식 노드가 없는 경우 (탐색 실패)
         if not self.root.children:
-            safest = min(self.root.available_pieces, 
-                         key=lambda p: sum(1 for e in product(range(4), range(4)) 
-                                         if self.root.board[e[0]][e[1]] == 0 
-                                         and MCTSNode._opponent_can_win_cached(
-                                             tuple(tuple(r) for r in self.root.board), p)))
-            return safest
+            if self.debug:
+                print("MCTS 탐색 실패, 안전한 피스 선택")
             
+            # 가장 안전한 피스 선택
+            board_key = tuple(tuple(r) for r in self.board)
+            safest = min(self.available_pieces, 
+                       key=lambda p: MCTSNode._opponent_can_win_cached(board_key, p))
+            
+            # 선택 기록
+            self.move_history.append(safest)
+            return safest
+        
         # 상대 경향에 따른 자식 노드 조정
         self._adjust_children_by_trends(attr_distribution)
         
+        # 가장 좋은 자식 노드 선택
         best = max(self.root.children, key=lambda c: c.visits)
         self.root = best
         choice = best.selected_piece
         
-        # 선택을 기록
-        self.move_history.append(choice)
+        if self.debug:
+            print(f"MCTS 선택 피스: {MCTSNode._get_mbti_name(choice)} (방문: {best.visits}회, 승률: {best.wins/best.visits:.2f})")
         
-        print(f"SELECT_PIECE -> {choice}, iters={self.last_search_iterations}")
+        # 선택 기록
+        self.move_history.append(choice)
         return choice
 
     def place_piece(self, piece: Tuple[int,int,int,int]) -> Tuple[int,int]:
-        # Immediate win if available
+        """주어진 피스를 보드에 배치"""
+        if self.debug:
+            print("\n===== 피스 배치 단계 =====")
+            print(f"배치할 피스: {MCTSNode._get_mbti_name(piece)}")
+        
+        # 1. 즉시 승리 가능한 위치 체크
         for r, c in product(range(4), range(4)):
-            if self.root.board[r][c] == 0:
-                temp = [row.copy() for row in self.root.board]
+            if self.board[r][c] == 0:
+                # 임시 배치
+                temp = [row.copy() for row in self.board]
                 temp[r][c] = MCTSNode._encode_piece(piece)
+                
+                # 승리 체크
                 if MCTSNode._check_win(temp):
                     # 승리 위치 기록
                     self.move_history.append((r, c))
-                    print(f"PLACE_PIECE -> ({r},{c}), iters={self.last_search_iterations}")
+                    if self.debug:
+                        print(f"즉시 승리 위치 발견: ({r},{c})")
                     return (r, c)
 
-        # 양방 3목 기회 찾기
+        # 2. 양방 3목 기회 찾기
         fork_opportunities = []
         for r, c in product(range(4), range(4)):
-            if self.root.board[r][c] == 0:
-                if self._check_fork_opportunities(self.root.board, (r, c), piece):
+            if self.board[r][c] == 0:
+                if self._check_fork_opportunities((r, c), piece):
                     fork_opportunities.append((r, c))
                     
         if fork_opportunities:
-            choice = random.choice(fork_opportunities)
+            # 양방 3목 위치 중 중앙에 가까운 것 선택
+            choice = min(fork_opportunities, 
+                       key=lambda pos: abs(pos[0]-1.5) + abs(pos[1]-1.5))
+            
             self.move_history.append(choice)
-            print(f"PLACE_PIECE [FORK] -> {choice}")
+            if self.debug:
+                print(f"양방 3목 기회 활용: {choice}")
             return choice
-                
-        # Identify dangerous spots
-        danger_spots = [(r, c) for r, c in product(range(4), range(4)) 
-                       if self.root.board[r][c]==0 and self._danger_level((r,c), piece)>0]
-                       
-        # Search with enhanced strategy
+        
+        # 3. 위험한 위치 파악
+        danger_spots = []
+        for r, c in product(range(4), range(4)):
+            if self.board[r][c] == 0:
+                danger = self._danger_level((r, c), piece)
+                if danger > 2:  # 위험도 임계값
+                    danger_spots.append(((r, c), danger))
+        
+        # 위험도 순으로 정렬
+        danger_spots.sort(key=lambda x: x[1], reverse=True)
+        
+        if self.debug and danger_spots:
+            print("위험 위치:")
+            for (r, c), score in danger_spots[:3]:  # 상위 3개만 출력
+                print(f"  ({r},{c}): {score}")
+        
+        # 4. MCTS 탐색
         self._search()
         
-        # No children: pick safe or first empty
+        # 5. 자식 노드가 없는 경우 (탐색 실패)
         if not self.root.children:
-            empties = [(r,c) for r,c in product(range(4), range(4)) if self.root.board[r][c]==0]
-            safe = [e for e in empties if e not in danger_spots]
+            if self.debug:
+                print("MCTS 탐색 실패, 안전한 위치 직접 선택")
+            
+            # 빈 위치 목록
+            empties = [(r,c) for r,c in product(range(4), range(4)) 
+                      if self.board[r][c] == 0]
+            
+            # 위험한 위치 제외
+            dangerous = [pos for pos, _ in danger_spots if _ >= 5]  # 매우 위험한 위치만
+            safe = [e for e in empties if e not in dangerous]
             
             # 중앙에 가까운 안전한 위치 선호
             if safe:
                 safe.sort(key=lambda pos: abs(pos[0]-1.5) + abs(pos[1]-1.5))
                 choice = safe[0]
             else:
-                empties.sort(key=lambda pos: abs(pos[0]-1.5) + abs(pos[1]-1.5))
+                # 안전한 위치가 없으면 그나마 덜 위험한 위치 선택
+                empties.sort(key=lambda pos: sum(score for p, score in danger_spots if p == pos))
                 choice = empties[0]
-                
-            self.move_history.append(choice)
-            print(f"PLACE_PIECE -> {choice}, iters={self.last_search_iterations}")
-            return choice
             
-        # Use child visitation to pick move not in danger
+            self.move_history.append(choice)
+            if self.debug:
+                print(f"선택된 위치: {choice}")
+            return choice
+        
+        # 6. 최고의 자식 노드 사용
         best = max(self.root.children, key=lambda c: c.visits)
         
-        # 최적의 위치 찾기
+        # 7. 최적의 위치 찾기
+        move_pos = None
         for r, c in product(range(4), range(4)):
-            if best.board[r][c]!=self.root.board[r][c] and self.root.board[r][c]==0:
-                if (r,c) not in danger_spots:
-                    self.move_history.append((r, c))
-                    print(f"PLACE_PIECE -> ({r},{c}), iters={self.last_search_iterations}")
-                    return (r, c)
-                    
-        # Fallback - 최대한 중앙에 가까운 위치 선택
-        empties = [(r,c) for r,c in product(range(4), range(4)) if self.root.board[r][c]==0]
-        if empties:
-            choice = min(empties, key=lambda pos: abs(pos[0]-1.5) + abs(pos[1]-1.5))
-            self.move_history.append(choice)
-            print(f"PLACE_PIECE -> {choice}, iters={self.last_search_iterations}")
-            return choice
+            if best.board[r][c] != self.board[r][c] and self.board[r][c] == 0:
+                # 매우 위험한 위치 피하기
+                is_very_dangerous = any(pos == (r, c) and score >= 7 
+                                     for pos, score in danger_spots)
+                
+                if not is_very_dangerous:
+                    move_pos = (r, c)
+                    break
+        
+        # 8. 위치 못 찾은 경우 안전한 위치 선택
+        if not move_pos:
+            # 빈 위치 목록
+            empties = [(r,c) for r,c in product(range(4), range(4)) 
+                      if self.board[r][c] == 0]
             
-        # 더 이상 둘 곳 없음
-        fallback = next((e for e in product(range(4), range(4)) if self.root.board[e[0]][e[1]]==0), (0, 0))
-        self.move_history.append(fallback)
-        print(f"PLACE_PIECE -> {fallback}, iters={self.last_search_iterations}")
-        return fallback
+            if empties:
+                # 위험도와 중앙 근접성의 균형 고려
+                choice = min(empties, 
+                          key=lambda pos: sum(score for p, score in danger_spots if p == pos) + 
+                                        2 * (abs(pos[0]-1.5) + abs(pos[1]-1.5)))
+                move_pos = choice
+            else:
+                # 더 이상 둘 곳 없음
+                move_pos = next((pos for pos, _ in product(range(4), range(4)) 
+                               if self.board[pos[0]][pos[1]] == 0), (0, 0))
+        
+        self.move_history.append(move_pos)
+        if self.debug:
+            print(f"최종 선택 위치: {move_pos} (방문: {best.visits}회, 승률: {best.wins/best.visits:.2f})")
+        
+        return move_pos
 
-    def _encode_pattern(self, move):
+    def _encode_pattern(self, move) -> str:
         """게임 패턴을 고유 키로 인코딩"""
         if isinstance(move, tuple):
             if len(move) == 4:  # 피스 선택
@@ -685,35 +1029,86 @@ class P1:
         return f"unknown:{move}"
             
     def _save_patterns(self):
-        """승률 높은 패턴 저장"""
+        """승률 높은 패턴 안정적으로 저장"""
         try:
-            with open('winning_patterns.dat', 'wb') as f:
-                pickle.dump(self.win_patterns, f)
-        except:
-            pass
+            # 스크립트 위치 기반 경로 설정
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            file_path = os.path.join(script_dir, 'quarto_patterns.dat')
+            
+            # 메타데이터 포함하여 저장
+            data = {
+                "version": "1.0",
+                "timestamp": time.time(),
+                "patterns": self._global_win_patterns
+            }
+            
+            with open(file_path, 'wb') as f:
+                pickle.dump(data, f)
+                
+            if self.debug:
+                print(f"패턴 저장 완료: {len(self._global_win_patterns)} 항목")
+        except Exception as e:
+            if self.debug:
+                print(f"패턴 저장 실패: {str(e)}")
             
     def _load_patterns(self):
-        """저장된 패턴 불러오기"""
+        """저장된 패턴 안정적으로 불러오기"""
         try:
-            with open('winning_patterns.dat', 'rb') as f:
-                self.win_patterns = pickle.load(f)
-        except:
-            self.win_patterns = {}
+            # 스크립트 위치 기반 경로 설정
+            script_dir = os.path.dirname(os.path.abspath(__file__))
+            file_path = os.path.join(script_dir, 'quarto_patterns.dat')
+            
+            if os.path.exists(file_path):
+                with open(file_path, 'rb') as f:
+                    data = pickle.load(f)
+                    # 버전 확인 및 데이터 추출
+                    if isinstance(data, dict) and "patterns" in data:
+                        self._global_win_patterns = data["patterns"]
+                    else:
+                        self._global_win_patterns = data
+                    
+                if self.debug:
+                    print(f"패턴 로드 완료: {len(self._global_win_patterns)} 항목")
+            else:
+                self._global_win_patterns = {}
+                if self.debug:
+                    print("패턴 파일 없음, 새로 시작")
+        except Exception as e:
+            self._global_win_patterns = {}
+            if self.debug:
+                print(f"패턴 로드 실패: {str(e)}")
 
     def record_game(self, won: bool):
-        """게임 종료 후 기록 저장"""
+        """게임 종료 후 학습 데이터 업데이트"""
+        if self.debug:
+            print(f"\n===== 게임 종료: {'승리' if won else '패배'} =====")
+        
+        # 각 패턴의 총 사용 횟수 기록
+        for move in self.move_history:
+            pattern_key = self._encode_pattern(move)
+            total_key = f"total:{pattern_key}"
+            
+            if total_key in self._global_win_patterns:
+                self._global_win_patterns[total_key] += 1
+            else:
+                self._global_win_patterns[total_key] = 1
+        
+        # 승리한 게임만 승리 패턴으로 기록
         if won:
-            # 승리한 게임의 패턴을 기록
             for move in self.move_history:
                 pattern_key = self._encode_pattern(move)
-                if pattern_key in self.win_patterns:
-                    self.win_patterns[pattern_key] += 1
+                
+                if pattern_key in self._global_win_patterns:
+                    self._global_win_patterns[pattern_key] += 1
                 else:
-                    self.win_patterns[pattern_key] = 1
+                    self._global_win_patterns[pattern_key] = 1
+            
+            if self.debug:
+                print(f"승리 패턴 {len(self.move_history)}개 기록됨")
         
         # 게임 히스토리 초기화
         self.move_history = []
         
-        # 승률이 높은 패턴을 파일에 저장
-        if random.random() < 0.1:  # 10% 확률로 저장 (성능 최적화)
+        # 10% 확률로 학습 데이터 저장 (너무 자주 저장하지 않도록)
+        if random.random() < 0.1:
             self._save_patterns()
