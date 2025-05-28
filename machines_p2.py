@@ -1,8 +1,20 @@
 import random
 from typing import List, Tuple, Optional
 from functools import lru_cache
+import sys
 
 class P2:
+    # 게임 평가 상수 (P2 관점)
+    WIN_SCORE = 10000.0
+    LOSE_SCORE = -10000.0
+    DRAW_SCORE = 0.0
+    FORK_BONUS = 500.0  # 양방 3목 기회
+    MATCHING_ATTRIBUTES_BONUS = 10.0  # 3개 속성 일치 라인 하나당 보너스
+    CENTER_BONUS = 20.0  # 중앙 위치 보너스
+    CORNER_BONUS = 10.0  # 코너 위치 보너스
+    IMMEDIATE_WIN_BONUS = 1000.0  # 즉시 승리 기회
+    THREE_IN_ROW_BONUS = 100.0  # 3목 기회
+
     def __init__(self, board: List[List[int]], available_pieces: List[Tuple[int,int,int,int]]):
         # 깊은 복사로 안전하게 초기 상태 저장
         self.board = [row.copy() for row in board]
@@ -13,6 +25,7 @@ class P2:
         self.index_to_piece = {idx+1: p for idx,p in enumerate(self.pieces)}  # 인덱스로 피스 찾기 추가
         self.minimax_depth = self._get_minimax_depth()  # 동적 깊이 설정
         self.chosen_piece = None  # place_piece에서 결정된 '상대에게 줄 피스'를 저장할 변수
+        self.debug = True
 
     def _get_minimax_depth(self) -> int:
         """
@@ -22,51 +35,85 @@ class P2:
         """
         empty_count = sum(1 for row in self.board for cell in row if cell == 0)
         
-        # 게임 초반 (15개 이상 빈칸)
-        if empty_count >= 15:
-            return 1  # 빠르게 판단
+        # 게임 초반 (12개 이상 빈칸)
+        if empty_count >= 12:
+            return 2  # 초반에도 적당한 깊이로 탐색
         
         # 게임 중반 (8-11개 빈칸)
         elif empty_count >= 8:
-            return 4  # 좀 더 깊이 탐색
+            return 3  # 중반에는 좀 더 깊이 탐색
         
         # 게임 후반 (4-7개 빈칸)
         elif empty_count >= 4:
-            return 4  # 더 깊이 탐색하여 실수 방지
+            return 4  # 후반에는 더 깊이 탐색
         
         # 게임 막바지 (3개 이하 빈칸)
         else:
-            return 5  # 거의 끝났으므로 꼼꼼하게 탐색
+            return 5  # 막바지에는 최대한 깊게 탐색
 
-    def _danger_score(self, board: List[List[int]], current_available_pieces: List[Tuple[int,int,int,int]], piece: Tuple[int,int,int,int]) -> int:
+    def _danger_score(self, board: Tuple[Tuple[int, ...], ...], current_available_pieces: Tuple[Tuple[int,int,int,int], ...], piece: Tuple[int,int,int,int]) -> float:
         """
-        해당 피스가 얼마나 위험한지 점수 계산
+        주어진 피스가 상대방(P1)에게 얼마나 위험한지 점수를 계산합니다.
+        점수가 높을수록 P2에게는 위험한 피스 (즉, 상대에게는 좋은 피스)입니다.
+        이 함수는 P2가 P1에게 줄 피스를 선택할 때 활용됩니다.
+        
         Args:
-            board: 현재 게임 보드
-            current_available_pieces: 현재 사용 가능한 피스 목록
+            board: 현재 게임 보드 상태 (튜플 형태)
+            current_available_pieces: P2가 현재 가진 피스 목록 (튜플 형태)
             piece: 평가할 피스
         Returns:
-            int: 점수가 높을수록 위험한 피스 (3속성 일치하는 줄이 많을수록 위험)
+            float: 위험도 점수
         """
-        score = 0
-        # 1. 양방 3목 가능성 체크 (높은 위험도)
-        if self._is_unavoidable_fork(board, current_available_pieces, piece):
-            score += 10
+        if self.debug:
+            sys.stdout.write(f"  [Danger] 피스 {self._binary_to_mbti(piece)}의 위험도 평가 시작...\n")
+            sys.stdout.flush()
+
+        score = 0.0
         
-        # 2. 3목 가능성 체크 (중간 위험도)
-        for r in range(4):
-            for c in range(4):
-                if board[r][c] == 0:
-                    if self._count_matching_attributes(board, r, c, piece) >= 3:
-                        score += 5
-        
-        # 3. 2목 가능성 체크 (낮은 위험도)
-        for r in range(4):
-            for c in range(4):
-                if board[r][c] == 0:
-                    if self._count_matching_attributes(board, r, c, piece) >= 2:
-                        score += 2
-        
+        # 1. 즉시 승리 가능성 체크 (매우 높은 위험도)
+        for r, c in self._get_empty_positions(board):
+            if self._is_winning_move(board, r, c, piece):
+                if self.debug:
+                    sys.stdout.write(f"  [Danger] 즉시 승리 가능성 감지! Score: {self.IMMEDIATE_WIN_BONUS}\n")
+                    sys.stdout.flush()
+                return self.IMMEDIATE_WIN_BONUS
+
+        # 2. 양방 3목 가능성 체크 (높은 위험도)
+        if self._is_unavoidable_fork(board, piece):
+            if self.debug:
+                sys.stdout.write(f"  [Danger] 양방 3목 가능성 감지! Score: {self.FORK_BONUS}\n")
+                sys.stdout.flush()
+            score += self.FORK_BONUS
+
+        # 3. 3목 가능성 체크 (중간 위험도)
+        for r, c in self._get_empty_positions(board):
+            matching_lines = self._count_matching_attributes(board, r, c, piece)
+            if matching_lines >= 1:
+                score += self.THREE_IN_ROW_BONUS * matching_lines
+                if self.debug:
+                    sys.stdout.write(f"  [Danger] 위치 ({r},{c})에서 {matching_lines}개의 3목 가능성 감지! 현재 점수: {score}\n")
+                    sys.stdout.flush()
+
+        # 4. 중앙/코너 제어 가능성 체크
+        for r, c in [(1,1), (1,2), (2,1), (2,2)]:  # 중앙 위치
+            if board[r][c] == 0:  # 빈 칸인 경우
+                score += self.CENTER_BONUS * 0.5  # 중앙 제어 가능성에 대한 보너스
+        for r, c in [(0,0), (0,3), (3,0), (3,3)]:  # 코너 위치
+            if board[r][c] == 0:  # 빈 칸인 경우
+                score += self.CORNER_BONUS * 0.5  # 코너 제어 가능성에 대한 보너스
+
+        # 5. 상대방의 남은 피스들과의 관계 평가
+        # 현재 피스와 상대방의 남은 피스들 간의 보완 관계를 평가
+        for other_piece in current_available_pieces:
+            if other_piece != piece:
+                # 두 피스가 3개 이상의 속성을 공유하는지 확인
+                matching_attrs = sum(1 for i in range(4) if piece[i] == other_piece[i])
+                if matching_attrs >= 3:
+                    score += self.MATCHING_ATTRIBUTES_BONUS * matching_attrs
+
+        if self.debug:
+            sys.stdout.write(f"  [Danger] 최종 위험도 점수: {score}\n")
+            sys.stdout.flush()
         return score
 
     def _binary_to_mbti(self, piece: Tuple[int,int,int,int]) -> str:
@@ -189,84 +236,101 @@ class P2:
         
         return forced_lose
 
-    def place_piece(self, selected_piece: Tuple[int,int,int,int], simulations: int = 1000) -> Tuple[int,int]:
+    def place_piece(self, selected_piece: Tuple[int,int,int,int]) -> Tuple[int,int]:
         """
-        Minimax를 사용하여 최적의 위치와 다음 턴에 상대에게 줄 피스를 결정
+        P2가 Minimax를 사용하여 최적의 위치와 다음 턴에 상대에게 줄 피스를 결정합니다.
+        P2는 항상 후공이므로, Minimax 탐색 시 최소화 플레이어의 관점에서 시작합니다.
+        Args:
+            selected_piece: P1이 P2에게 준, P2가 보드에 놓을 피스
+        Returns:
+            Tuple[int, int]: 피스를 놓을 위치 (r, c)
         """
-        print("\n===== [P1] 피스 배치 단계 =====")
+        print("\n===== [P2] 피스 배치 단계 =====")
         print(f"depth: {self.minimax_depth}")
-        print(f"배치할 피스: {self._binary_to_mbti(selected_piece)}")
+        print(f"배치할 피스 (P1이 준 피스): {self._binary_to_mbti(selected_piece)}")
         
-        # 현재 게임 상태에 따라 깊이 동적 조정
         self.minimax_depth = self._get_minimax_depth()  # 매 턴마다 깊이 업데이트
         print(f"현재 Minimax 깊이: {self.minimax_depth}")
         
-        # 빈 칸 수와 남은 피스 수 출력
         empty_count = sum(1 for row in self.board for cell in row if cell == 0)
         print(f"보드 상태: {16-empty_count}/16칸 배치됨")
         print(f"남은 피스: {len(self.available_pieces)}")
         
         # Minimax 호출 전에 캐시 초기화
         self.minimax.cache_clear()
+        self._evaluate_game_state.cache_clear()
         
-        # Minimax 호출 (현재 보드, 내가 놓을 피스, 내가 줄 수 있는 피스들, 깊이, 알파, 베타, 내가 최대화 플레이어)
+        # Minimax 호출 (P2는 항상 후공이므로 is_maximizing_player=False)
         eval_score, best_piece_to_give, best_pos_to_place = self.minimax(
             tuple(tuple(r) for r in self.board),  # 현재 보드 상태 (튜플)
-            selected_piece,  # 내가 놓을 피스
-            tuple(self.available_pieces),  # 내가 상대에게 줄 수 있는 피스 목록 (튜플)
+            selected_piece,  # P2가 놓을 피스 (P1이 P2에게 준 피스)
+            tuple(self.available_pieces),  # P2가 P1에게 줄 수 있는 피스 목록
             self.minimax_depth,  # 동적으로 조정된 깊이 사용
             float('-inf'), 
-            float('inf'), 
-            True  # 나의 턴 (최대화)
+            float('inf'),
+            False  # P2는 최소화 플레이어
         )
         
         # Minimax가 결정한 최적의 '상대에게 줄 피스'를 저장
-        if best_piece_to_give is not None:
-            self.chosen_piece = best_piece_to_give
-            print(f"다음 턴에 줄 피스: {self._binary_to_mbti(best_piece_to_give)}")
-        else:
-            # 비상 상황: Minimax가 피스를 선택하지 못한 경우
-            print("⚠️ Warning: Minimax가 상대에게 줄 피스를 선택하지 못했습니다. 대체 로직 사용.")
-            # 위험도가 가장 낮은 피스 선택
-            safe_pieces = []
-            for piece_candidate in self.available_pieces:
-                if not self._is_immediate_win_for_opponent(self.board, self.available_pieces, piece_candidate):
-                    safe_pieces.append(piece_candidate)
+        if best_pos_to_place is None or best_piece_to_give is None:
+            print("⚠️ Warning: Minimax가 최적의 위치 또는 피스를 선택하지 못했습니다. 대체 로직 사용.")
             
-            if safe_pieces:
-                # 위험도 점수 계산 및 정렬
-                piece_scores = [(p, self._danger_score(self.board, self.available_pieces, p)) for p in safe_pieces]
-                piece_scores.sort(key=lambda x: x[1])
-                self.chosen_piece = piece_scores[0][0]
-                print(f"대체 선택 피스: {self._binary_to_mbti(self.chosen_piece)} (위험도: {piece_scores[0][1]:.2f})")
-            else:
-                # 모든 피스가 위험한 경우
-                piece_scores = [(p, self._danger_score(self.board, self.available_pieces, p)) for p in self.available_pieces]
-                piece_scores.sort(key=lambda x: x[1])
-                self.chosen_piece = piece_scores[0][0]
-                print(f"최소 위험도 피스 선택: {self._binary_to_mbti(self.chosen_piece)} (위험도: {piece_scores[0][1]:.2f})")
-
-        if best_pos_to_place is None:
-            # Minimax가 최적의 위치를 찾지 못한 경우 (게임 종료 또는 오류)
-            print("⚠️ Warning: Minimax가 최적의 위치를 찾지 못했습니다. 대체 로직 사용.")
-            # 이 경우, 첫 번째 빈 칸에 놓는 비상 로직
+            # --- 대체 로직: 놓을 위치 선택 ---
             empty_positions = self._get_empty_positions(self.board)
-            if empty_positions:
-                best_pos_to_place = empty_positions[0]
-                print(f"대체 위치 선택: {best_pos_to_place}")
+            if not empty_positions:
+                print("⚠️ Error: 더 이상 놓을 곳이 없습니다. (게임 종료 예상)")
+                return (0, 0)
+            
+            position_scores = []
+            for r, c in empty_positions:
+                # P2의 관점에서 해당 위치에 selected_piece를 놓았을 때의 점수를 평가
+                score_at_pos = self._evaluate_position(tuple(tuple(row) for row in self.board), (r, c), selected_piece)
+                position_scores.append((score_at_pos, (r, c)))
+            
+            # P2는 자신의 점수를 최대화해야 하므로 내림차순 정렬
+            position_scores.sort(key=lambda x: x[0], reverse=True)
+            best_pos_to_place = position_scores[0][1]
+            print(f"  - 대체 선택 위치: {best_pos_to_place} (상위 3개 후보):")
+            for i, (score, pos) in enumerate(position_scores[:3]):
+                print(f"    {i+1}. 위치: {pos}, 점수: {score:.2f}")
+
+            # --- 대체 로직: 상대에게 줄 피스 선택 ---
+            # P2가 놓은 selected_piece를 제외한 남은 피스들
+            remaining_pieces_for_giving_to_p1 = list(self.available_pieces)
+            if selected_piece in remaining_pieces_for_giving_to_p1:
+                remaining_pieces_for_giving_to_p1.remove(selected_piece)
+            
+            if not remaining_pieces_for_giving_to_p1:
+                print("⚠️ Error: 상대에게 줄 피스가 남아있지 않습니다. (이전 턴에서 모든 피스 소진 예상)")
+                self.chosen_piece = (0,0,0,0)
             else:
-                print("더 이상 놓을 곳이 없습니다.")
-                return (0, 0)  # 더 이상 놓을 곳이 없으면 (예: 보드 꽉 참)
-        else:
+                # _danger_score를 사용하여 위험도가 가장 낮은 피스 선택
+                piece_danger_scores = []
+                for piece_candidate in remaining_pieces_for_giving_to_p1:
+                    danger = self._danger_score(
+                        tuple(tuple(r) for r in self.board),  # 현재 보드
+                        tuple(p for p in remaining_pieces_for_giving_to_p1 if p != piece_candidate),  # piece_candidate를 제외한 나머지 피스들
+                        piece_candidate  # P1에게 줄 피스 후보
+                    )
+                    piece_danger_scores.append((danger, piece_candidate))
+                
+                # 위험도가 낮은 순으로 정렬 (오름차순)
+                piece_danger_scores.sort(key=lambda x: x[0])
+                self.chosen_piece = piece_danger_scores[0][1]  # 가장 위험도가 낮은 피스 선택
+                print(f"  - 대체 선택 피스: {self._binary_to_mbti(self.chosen_piece)} (상위 3개 후보):")
+                for i, (danger_score, piece) in enumerate(piece_danger_scores[:3]):
+                    print(f"    {i+1}. 피스: {self._binary_to_mbti(piece)}, 위험도: {danger_score:.2f}")
+
+        else:  # Minimax가 성공적으로 최적의 수를 찾은 경우
+            self.chosen_piece = best_piece_to_give
             print(f"Minimax 선택 위치: {best_pos_to_place} (평가 점수: {eval_score:.2f})")
+            print(f"다음 턴에 줄 피스: {self._binary_to_mbti(self.chosen_piece)}")
         
         return best_pos_to_place
 
-    def select_piece(self, simulations: int = 2000) -> Tuple[int,int,int,int]:
+    def select_piece(self) -> Tuple[int,int,int,int]:
         """
         place_piece 단계에서 Minimax가 결정한 '상대에게 줄 최적의 피스'를 반환
-        Args:
-            simulations: 시뮬레이션 횟수 (사용하지 않음)
         Returns:
             Tuple[int,int,int,int]: 상대에게 줄 최적의 피스
         """
@@ -365,26 +429,43 @@ class P2:
         
         return score
 
-    @lru_cache(maxsize=None)
+    @lru_cache(maxsize=16384)
     def minimax(self, 
                 board: Tuple[Tuple[int, ...], ...], 
                 current_player_piece: Optional[Tuple[int,int,int,int]], 
                 remaining_available_pieces: Tuple[Tuple[int,int,int,int], ...], 
                 depth: int, 
                 alpha: float, 
-                beta: float, 
+                beta: float,
                 is_maximizing_player: bool) -> Tuple[float, Optional[Tuple[int,int,int,int]], Optional[Tuple[int,int]]]:
         """
-        Minimax 알고리즘 구현
+        Minimax 알고리즘 구현 (P2는 항상 후공)
+        Args:
+            board: 현재 게임 보드 상태
+            current_player_piece: 현재 플레이어가 놓을 피스
+            remaining_available_pieces: 남은 사용 가능한 피스 목록
+            depth: 현재 탐색 깊이
+            alpha: 알파 값 (최대화 플레이어의 최선의 값)
+            beta: 베타 값 (최소화 플레이어의 최선의 값)
+            is_maximizing_player: True면 P1(최대화), False면 P2(최소화)의 턴
         Returns:
             Tuple[float, Optional[Tuple[int,int,int,int]], Optional[Tuple[int,int]]]: 
             (평가 점수, 상대에게 줄 피스, 놓을 위치)
         """
         # 게임 종료 체크
-        if depth == 0 or not remaining_available_pieces:
-            return (self._evaluate_position(list(map(list, board))), None, None)
+        if self._check_win_cached(board):
+            return (float('-inf') if is_maximizing_player else float('inf'), 
+                   remaining_available_pieces[0] if remaining_available_pieces else None,
+                   self._get_empty_positions(list(map(list, board)))[0] if self._get_empty_positions(list(map(list, board))) else None)
 
-        if is_maximizing_player:  # 나의 턴 (P1)
+        # 깊이 제한 또는 사용 가능한 피스가 없는 경우
+        if depth == 0 or not remaining_available_pieces:
+            eval_score = self._evaluate_game_state(board)
+            return (eval_score,
+                   remaining_available_pieces[0] if remaining_available_pieces else None,
+                   self._get_empty_positions(list(map(list, board)))[0] if self._get_empty_positions(list(map(list, board))) else None)
+
+        if is_maximizing_player:  # P1의 턴
             max_eval = float('-inf')
             best_pos_to_place = None
             best_piece_to_give = None
@@ -393,44 +474,38 @@ class P2:
             ordered_moves = self._get_ordered_moves(
                 list(map(list, board)),
                 list(remaining_available_pieces),
-                True,
                 current_player_piece
             )
 
-            # Step 1: 현재 받은 'current_player_piece'를 보드에 놓을 위치 선택
             for r, c, piece_to_give in ordered_moves:
                 temp_board_after_place = [list(row) for row in board]
                 temp_board_after_place[r][c] = self.piece_to_index[current_player_piece]
                 
                 # 내가 이 수로 승리하는지 체크
                 if self._check_win(temp_board_after_place):
-                    # 승리하는 경우, 가장 안전한 피스를 선택
-                    safe_pieces = [p for p in remaining_available_pieces if not self._is_immediate_win_for_opponent(temp_board_after_place, list(remaining_available_pieces), p)]
-                    if safe_pieces:
-                        best_piece_to_give = safe_pieces[0]
-                    return (float('inf'), best_piece_to_give, (r,c))
+                    return (float('inf'), piece_to_give, (r,c))
 
                 # 상대가 이 피스로 이길 수 있는지 체크
                 if self._is_immediate_win_for_opponent(temp_board_after_place, list(remaining_available_pieces), piece_to_give):
-                    continue  # 이 피스는 상대에게 주지 않음
+                    continue
 
-                next_available_pieces_tuple = tuple(p for p in remaining_available_pieces if p != piece_to_give)
+                next_available_pieces = tuple(p for p in remaining_available_pieces if p != piece_to_give)
 
-                # --- 재귀 호출 (상대방 턴) ---
+                # 재귀 호출 (P2의 턴)
                 eval_score, _, _ = self.minimax(
                     tuple(tuple(r_sub) for r_sub in temp_board_after_place),
-                    piece_to_give,  # 상대방이 놓을 피스
-                    next_available_pieces_tuple,  # 상대방이 나에게 줄 피스 선택을 위해 고려할 남은 피스
+                    piece_to_give,
+                    next_available_pieces,
                     depth - 1,
                     alpha,
                     beta,
-                    False  # 상대방 턴
+                    False
                 )
 
                 if eval_score > max_eval:
                     max_eval = eval_score
                     best_pos_to_place = (r, c)
-                    best_piece_to_give = piece_to_give  # 현재 턴에 내가 선택할, 상대에게 줄 피스
+                    best_piece_to_give = piece_to_give
 
                 alpha = max(alpha, eval_score)
                 if beta <= alpha:
@@ -438,53 +513,44 @@ class P2:
 
             return (max_eval, best_piece_to_give, best_pos_to_place)
 
-        else:  # 상대방 턴 (P2)
+        else:  # P2의 턴
             min_eval = float('inf')
             best_pos_to_place = None
             best_piece_to_give = None
 
-            # 정렬된 이동 목록 가져오기
             ordered_moves = self._get_ordered_moves(
                 list(map(list, board)),
                 list(remaining_available_pieces),
-                False,
                 current_player_piece
             )
 
-            # Step 1: 현재 받은 'current_player_piece'를 보드에 놓을 위치 선택
             for r, c, piece_to_give in ordered_moves:
                 temp_board_after_place = [list(row) for row in board]
                 temp_board_after_place[r][c] = self.piece_to_index[current_player_piece]
-                
-                # 상대가 이 수로 승리하는지 체크
+
                 if self._check_win(temp_board_after_place):
-                    # 상대가 승리하는 경우, 가장 위험한 피스를 선택
-                    dangerous_pieces = [p for p in remaining_available_pieces if self._is_immediate_win_for_opponent(temp_board_after_place, list(remaining_available_pieces), p)]
-                    if dangerous_pieces:
-                        best_piece_to_give = dangerous_pieces[0]
-                    return (float('-inf'), best_piece_to_give, (r,c))
+                    return (float('-inf'), piece_to_give, (r,c))
 
-                # 내가 이 피스로 이길 수 있는지 체크
                 if self._is_immediate_win_for_opponent(temp_board_after_place, list(remaining_available_pieces), piece_to_give):
-                    continue  # 이 피스는 나에게 주지 않음
+                    continue
 
-                next_available_pieces_tuple = tuple(p for p in remaining_available_pieces if p != piece_to_give)
+                next_available_pieces = tuple(p for p in remaining_available_pieces if p != piece_to_give)
 
-                # --- 재귀 호출 (내 턴) ---
+                # 재귀 호출 (P1의 턴)
                 eval_score, _, _ = self.minimax(
                     tuple(tuple(r_sub) for r_sub in temp_board_after_place),
-                    piece_to_give,  # 내가 놓을 피스
-                    next_available_pieces_tuple,  # 내가 상대에게 줄 피스 선택을 위해 고려할 남은 피스
+                    piece_to_give,
+                    next_available_pieces,
                     depth - 1,
                     alpha,
                     beta,
-                    True  # 내 턴
+                    True
                 )
 
                 if eval_score < min_eval:
                     min_eval = eval_score
                     best_pos_to_place = (r, c)
-                    best_piece_to_give = piece_to_give  # 현재 턴에 상대가 선택할, 나에게 줄 피스
+                    best_piece_to_give = piece_to_give
 
                 beta = min(beta, eval_score)
                 if beta <= alpha:
@@ -492,13 +558,12 @@ class P2:
 
             return (min_eval, best_piece_to_give, best_pos_to_place)
 
-    def _get_ordered_moves(self, board: List[List[int]], current_available_pieces: List[Tuple[int,int,int,int]], is_maximizing: bool, piece_to_place: Optional[Tuple[int,int,int,int]] = None) -> List[Tuple[int, int, Tuple[int,int,int,int]]]:
+    def _get_ordered_moves(self, board: List[List[int]], current_available_pieces: List[Tuple[int,int,int,int]], piece_to_place: Optional[Tuple[int,int,int,int]] = None) -> List[Tuple[int, int, Tuple[int,int,int,int]]]:
         """
         이동 순서를 최적화하여 반환
         Args:
             board: 현재 게임 보드
             current_available_pieces: 현재 사용 가능한 피스 목록
-            is_maximizing: 현재 턴이 최대화 플레이어(P1) 턴인지 여부
             piece_to_place: 현재 턴에 보드에 놓을 피스 (선택적)
         Returns:
             List[Tuple[int, int, Tuple[int,int,int,int]]]: (r, c, piece) 튜플 리스트
@@ -556,7 +621,7 @@ class P2:
                     remaining_moves.append((score, r, c, piece))
         
         # 평가 점수 순으로 정렬 (최대화 플레이어는 높은 점수부터, 최소화 플레이어는 낮은 점수부터)
-        remaining_moves.sort(reverse=is_maximizing)
+        remaining_moves.sort(reverse=True)
         moves.extend([(r, c, piece) for _, r, c, piece in remaining_moves])
         
         return moves
@@ -587,24 +652,32 @@ class P2:
         return False
 
     def _check_line(self, line: List[int]) -> bool:
-        if line.count(0) > 1: return False  # 빈 칸이 2개 이상이면 체크할 필요 없음
-        attrs = [self.pieces[idx-1] for idx in line if idx != 0]  # 빈 칸 제외
-        if len(attrs) < 3: return False  # 3개 미만이면 체크할 필요 없음
+        """
+        주어진 라인(4개 피스 인덱스)이 쿼터 게임의 승리 조건을 만족하는지 확인합니다.
+        쿼터 승리 조건: 4개의 피스가 하나 이상의 속성을 공유.
+        """
+        filled_indices = [idx for idx in line if idx != 0]
+        if len(filled_indices) < 4: return False  # 4개의 피스가 모두 채워져야 함
+
+        attrs = [self.pieces[idx-1] for idx in filled_indices]
         
-        for i in range(4):  # 각 속성에 대해
-            matching_count = sum(1 for a in attrs if a[i] == attrs[0][i])
-            if matching_count >= 3:  # 3개 이상 일치하면 승리
+        # 4개의 피스가 하나 이상의 속성을 공유하는지 확인
+        for i in range(4):  # 각 속성 (0:크기, 1:모양, 2:색깔, 3:구멍)
+            if len(set(attr[i] for attr in attrs)) == 1:  # 모든 피스가 해당 속성에서 동일한 값을 가지는지
                 return True
         return False
 
     def _check_2x2(self, block: List[int]) -> bool:
-        if block.count(0) > 1: return False  # 빈 칸이 2개 이상이면 체크할 필요 없음
-        attrs = [self.pieces[idx-1] for idx in block if idx != 0]  # 빈 칸 제외
-        if len(attrs) < 3: return False  # 3개 미만이면 체크할 필요 없음
+        """
+        주어진 2x2 블록(4개 피스 인덱스)이 쿼터 게임의 승리 조건을 만족하는지 확인합니다.
+        쿼터 2x2 승리 조건: 4개의 피스가 하나 이상의 속성을 공유.
+        """
+        if block.count(0) > 0: return False  # 2x2 블록에 빈 칸이 있으면 안 됨
+        attrs = [self.pieces[idx-1] for idx in block]
         
-        for i in range(4):  # 각 속성에 대해
-            matching_count = sum(1 for a in attrs if a[i] == attrs[0][i])
-            if matching_count >= 3:  # 3개 이상 일치하면 승리
+        # 4개의 피스가 하나 이상의 속성을 공유하는지 확인
+        for i in range(4):  # 각 속성 (0:크기, 1:모양, 2:색깔, 3:구멍)
+            if len(set(attr[i] for attr in attrs)) == 1:  # 모든 피스가 해당 속성에서 동일한 값을 가지는지
                 return True
         return False
 
@@ -656,12 +729,11 @@ class P2:
                     board[r][c], board[r][c+1],
                     board[r+1][c], board[r+1][c+1]
                 ]
-                if block.count(0) <= 2:  # 빈 칸이 2개 이하
-                    block_pieces = [self.pieces[idx-1] for idx in block if idx != 0]
-                    if len(block_pieces) >= 2:
-                        for attr in range(4):
-                            matches = sum(1 for p in block_pieces if p[attr] == block_pieces[0][attr])
-                            if matches >= 2:
+                if block.count(0) == 0:  # 빈칸이 없는 경우만 체크
+                    block_pieces = [self.pieces[idx-1] for idx in block]
+                    if len(block_pieces) >= 4:  # 4개 이상의 말이 있는 경우만 체크
+                        for i in range(4):
+                            if len(set(p[i] for p in block_pieces)) == 1:
                                 potential_lines += 1
         
         return potential_lines
@@ -714,13 +786,11 @@ class P2:
         if len(row_pieces) >= 4:  # 4개 이상의 말이 있는 경우만 체크
             for i in range(4):  # 각 속성에 대해
                 if len(set(p[i] for p in row_pieces)) == 1:
-                    print(f"가로 승리: ({r},{c})에 {self._binary_to_mbti(piece)} 놓으면 승리")
                     return True
         
         if len(col_pieces) >= 4:  # 4개 이상의 말이 있는 경우만 체크
             for i in range(4):
                 if len(set(p[i] for p in col_pieces)) == 1:
-                    print(f"세로 승리: ({r},{c})에 {self._binary_to_mbti(piece)} 놓으면 승리")
                     return True
         
         # 대각선 체크
@@ -729,7 +799,6 @@ class P2:
             if len(diag_pieces) >= 4:  # 4개 이상의 말이 있는 경우만 체크
                 for i in range(4):
                     if len(set(p[i] for p in diag_pieces)) == 1:
-                        print(f"주대각선 승리: ({r},{c})에 {self._binary_to_mbti(piece)} 놓으면 승리")
                         return True
         
         if r + c == 3:  # 부 대각선
@@ -737,7 +806,6 @@ class P2:
             if len(diag_pieces) >= 4:  # 4개 이상의 말이 있는 경우만 체크
                 for i in range(4):
                     if len(set(p[i] for p in diag_pieces)) == 1:
-                        print(f"부대각선 승리: ({r},{c})에 {self._binary_to_mbti(piece)} 놓으면 승리")
                         return True
         
         # 2x2 블록 체크
@@ -805,11 +873,10 @@ class P2:
             for c in range(4):
                 if board[r][c] == 0:
                     if self._is_winning_move(board, r, c, piece):
-                        print(f"⚠️ 위험: {self._binary_to_mbti(piece)}를 주면 상대가 ({r},{c})에 놓고 이길 수 있음")
                         return True
         return False
 
-    def _is_unavoidable_fork(self, board: List[List[int]], available_pieces: List[Tuple[int,int,int,int]], piece: Tuple[int,int,int,int]) -> bool:
+    def _is_unavoidable_fork(self, board: List[List[int]], piece: Tuple[int,int,int,int]) -> bool:
         """
         해당 피스를 놓으면 양방 3목 필승이 되는지 체크
         """
@@ -845,3 +912,109 @@ class P2:
             three_in_a_row += 1
         
         return three_in_a_row >= 2
+
+    @lru_cache(maxsize=16384)
+    def _evaluate_game_state(self, board: Tuple[Tuple[int, ...], ...]) -> float:
+        """
+        주어진 보드 상태를 P2(최소화 플레이어)의 관점에서 평가합니다.
+        점수가 높을수록 P2에게 유리한 상태를 나타냅니다.
+        
+        Args:
+            board: 평가할 게임 보드 상태 (튜플 형태)
+        Returns:
+            float: 평가 점수
+        """
+        if self.debug:
+            sys.stdout.write(f"  [Evaluate] 보드 상태 평가 시작...\n")
+            sys.stdout.flush()
+
+        # 1. 게임 종료 조건 확인 (가장 높은/낮은 우선순위)
+        # P2의 승리 (나의 승리)
+        if any(self._is_winning_move(list(map(list, board)), r, c, self.index_to_piece[board[r][c]]) 
+               for r in range(4) for c in range(4) if board[r][c] != 0 and board[r][c] % 2 == 0):  # P2의 피스
+            if self.debug:
+                sys.stdout.write(f"  [Evaluate] P2 승리 감지! Score: {self.WIN_SCORE}\n")
+                sys.stdout.flush()
+            return self.WIN_SCORE
+        
+        # P1의 승리 (상대방의 승리)
+        if any(self._is_winning_move(list(map(list, board)), r, c, self.index_to_piece[board[r][c]]) 
+               for r in range(4) for c in range(4) if board[r][c] != 0 and board[r][c] % 2 != 0):  # P1의 피스
+            if self.debug:
+                sys.stdout.write(f"  [Evaluate] P1 승리 감지! Score: {self.LOSE_SCORE}\n")
+                sys.stdout.flush()
+            return self.LOSE_SCORE
+        
+        # 무승부 (보드가 꽉 찼고 승리 조건 없음)
+        if all(cell != 0 for row in board for cell in row):
+            if self.debug:
+                sys.stdout.write(f"  [Evaluate] 무승부 감지! Score: {self.DRAW_SCORE}\n")
+                sys.stdout.flush()
+            return self.DRAW_SCORE
+
+        score = 0.0
+
+        # 2. 중앙 제어 및 코너 제어 (P2의 피스에 가중치)
+        center_positions = [(1,1), (1,2), (2,1), (2,2)]
+        corner_positions = [(0,0), (0,3), (3,0), (3,3)]
+
+        for r, c in center_positions:
+            if board[r][c] != 0:
+                # P2의 피스 (짝수 인덱스)는 긍정적, P1의 피스 (홀수 인덱스)는 부정적
+                score += (1 if board[r][c] % 2 == 0 else -1) * self.CENTER_BONUS
+        
+        for r, c in corner_positions:
+            if board[r][c] != 0:
+                score += (1 if board[r][c] % 2 == 0 else -1) * self.CORNER_BONUS
+
+        # 3. 잠재적 라인 평가
+        # 각 빈 칸에 대해 P2가 놓을 수 있는 피스들로 평가
+        for r, c in self._get_empty_positions(list(map(list, board))):
+            # P2가 놓을 수 있는 피스들로 이 위치에 놓았을 때의 잠재력
+            for piece in self.available_pieces:
+                if self.debug:
+                    sys.stdout.write(f"  [Evaluate] 위치 ({r},{c}), 피스 {self._binary_to_mbti(piece)} (idx {self.piece_to_index[piece]}) 에 대한 잠재적 라인 계산...\n")
+                    sys.stdout.flush()
+                
+                # 즉시 승리 가능성
+                if self._is_winning_move(list(map(list, board)), r, c, piece):
+                    score += self.IMMEDIATE_WIN_BONUS
+                    continue
+
+                # 3목 기회
+                matching_lines = self._count_matching_attributes(list(map(list, board)), r, c, piece)
+                if matching_lines >= 1:
+                    score += self.THREE_IN_ROW_BONUS * matching_lines
+
+                # 포크 기회
+                if self._has_fork_opportunity(list(map(list, board)), self.available_pieces, piece, (r, c)):
+                    score += self.FORK_BONUS
+
+        if self.debug:
+            sys.stdout.write(f"  [Evaluate] 최종 평가 점수: {score}\n")
+            sys.stdout.flush()
+        return score
+
+    def get_chosen_piece(self) -> Tuple[int,int,int,int]:
+        """
+        P2가 선택한 피스를 반환합니다.
+        이 피스는 P1에게 전달되어 P1의 다음 턴에 사용됩니다.
+        
+        Returns:
+            Tuple[int,int,int,int]: P2가 선택한 피스
+        """
+        if not hasattr(self, 'chosen_piece') or self.chosen_piece is None:
+            print("⚠️ Warning: chosen_piece가 설정되지 않았습니다. 기본값 반환.")
+            return (0,0,0,0)
+        
+        print(f"\n===== [P2] 선택한 피스 반환 =====")
+        print(f"선택한 피스: {self._binary_to_mbti(self.chosen_piece)}")
+        
+        # 선택한 피스를 available_pieces에서 제거
+        if self.chosen_piece in self.available_pieces:
+            self.available_pieces.remove(self.chosen_piece)
+            print(f"남은 피스 수: {len(self.available_pieces)}")
+        else:
+            print("⚠️ Warning: 선택한 피스가 available_pieces에 없습니다.")
+        
+        return self.chosen_piece
