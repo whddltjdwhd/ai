@@ -825,7 +825,7 @@ class P1:
         """상대에게 줄 피스 선택"""
         # 디버깅 모드면 정보 출력
         if self.debug:
-            print("\n===== 피스 선택 단계 =====")
+            print("\n===== [P1] 피스 선택 단계 =====")
             print(f"남은 피스: {len(self.available_pieces)}")
             print(f"보드 상태: {sum(1 for r in range(4) for c in range(4) if self.board[r][c] != 0)}/16칸 배치됨")
         
@@ -945,7 +945,7 @@ class P1:
             selected_piece=piece
         )
         if self.debug:
-           print("\n===== 피스 배치 단계 (place) =====")
+           print("\n===== [P1] 피스 배치 단계 =====")
            print(f"배치할 피스: {MCTSNode._get_mbti_name(piece)}")
         # 1. 즉시 승리 가능한 위치 체크
         for r, c in product(range(4), range(4)):
