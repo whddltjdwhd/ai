@@ -619,14 +619,21 @@ class P1:
                 danger_level = 5  # 위험 (한 방향 3목)
             
             # 3. 다음 턴에 상대가 위험한 피스를 얻을 수 있는지
-            board_key = tuple(tuple(r) for r in board_copy)
-            for p in self.available_pieces:
-                if p != piece:
-                    risk = MCTSNode._opponent_can_win_cached(board_key, p)
-                    if risk == 2:  # 양방 3목 가능
-                        danger_level = max(danger_level, 7)
-                    elif risk == 1:  # 승리 가능
-                        danger_level = max(danger_level, 3)
+            board_key = tuple(tuple(r) for r in board_copy) # piece가 놓인 후의 보드
+            
+            # piece는 현재 pos에 놓는다고 가정한 말.
+            # p_next_for_opponent는 piece를 놓고 난 후, 다음 턴에 상대에게 줄 수 있는 후보 말.
+            # 따라서 p_next_for_opponent는 piece와 달라야 한다.
+            for p_next_for_opponent in self.available_pieces:
+                if p_next_for_opponent == piece: # piece는 이미 보드에 놓는 것으로 가정했으므로, 다음 턴에 상대에게 줄 수 없음
+                    continue
+                
+                # risk는 상대가 p_next_for_opponent 말을 받아서 board_copy 상태에 놓았을 때 이길 수 있는지 여부
+                risk = MCTSNode._opponent_can_win_cached(board_key, p_next_for_opponent)
+                if risk == 2:  # 양방 3목 가능
+                    danger_level = max(danger_level, 7)
+                elif risk == 1:  # 승리 가능
+                    danger_level = max(danger_level, 3)
         
         # 캐싱
         MCTSNode.danger_cache[cache_key] = danger_level
