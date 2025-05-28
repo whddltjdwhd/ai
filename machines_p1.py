@@ -517,8 +517,6 @@ class P1:
     """
     MCTS-based player with enhanced strategy against P2's approach.
     """
-    MAX_TURN_TIME = 10  # 최대 턴 시간 (초)
-    ITERATION_CAP = 3000  # 최대 반복 횟수
     
     # 게임 기록 관리를 위한 변수
     _instance_move_history = []  # 인스턴스별 기록
@@ -527,14 +525,29 @@ class P1:
     # 디버깅 모드를 클래스 변수로 설정
     debug = True
     
+    def _turn_time(self):
+        empty = sum(cell==0 for row in self.board for cell in row)
+        if empty >= 12:
+            return 5
+        elif empty >= 6:
+            return 15
+        else:
+            return 25
+
+        
     def __init__(
         self,
         board: List[List[int]],
-        available_pieces: List[Tuple[int,int,int,int]]
+        available_pieces: List[Tuple[int,int,int,int]],
+        avg_iters_per_sec: float = 500
     ):
         # 게임 상태 초기화
         self.board = [row.copy() for row in board]
         self.available_pieces = available_pieces.copy()
+        self.avg_iters_per_sec = avg_iters_per_sec
+        
+        self.MAX_TURN_TIME = self._turn_time()
+        self.ITERATION_CAP = int(self.avg_iters_per_sec * self.MAX_TURN_TIME * 0.95)
         
         # 선공/후공 판단 및 기본 파라미터 설정
         self.is_first = len(available_pieces) % 2 == 0
@@ -566,20 +579,20 @@ class P1:
         
         # 게임 초반 (16-12 빈칸) - 다양한 가능성 탐색
         if empty >= 12:
-            self.exploration = self.exploration_base * 1.5
-            self.heuristic_weight = self.heuristic_weight_base * 0.7
+            self.exploration = self.exploration_base * 1.4
+            self.heuristic_weight = self.heuristic_weight_base * 0.6
             MCTSNode.SIMULATION_DEPTH = 150
         
         # 게임 중반 (11-6 빈칸) - 균형적 탐색
         elif empty >= 6:
-            self.exploration = self.exploration_base * 1.0
-            self.heuristic_weight = self.heuristic_weight_base * 1.3
+            self.exploration = self.exploration_base * 1.2
+            self.heuristic_weight = self.heuristic_weight_base * 1.2
             MCTSNode.SIMULATION_DEPTH = 250
         
         # 게임 후반 (5-0 빈칸) - 전술적 탐색
         else:
-            self.exploration = self.exploration_base * 0.6
-            self.heuristic_weight = self.heuristic_weight_base * 1.8
+            self.exploration = self.exploration_base * 0.8
+            self.heuristic_weight = self.heuristic_weight_base * 1.6
             MCTSNode.SIMULATION_DEPTH = 350
 
     def _danger_level(self, pos: Tuple[int,int], piece: Tuple[int,int,int,int]) -> int:
@@ -908,155 +921,6 @@ class P1:
                 print(f"MCTS 실패 후 대체 선택 피스: {MCTSNode._get_mbti_name(choice)} (계산된 위험도: {danger_scores.get(choice, 'N/A')})")
             
             self.move_history.append(choice)
-            return choice
-        
-        # 6. 최고의 자식 노드 사용
-        best = max(self.root.children, key=lambda c: c.visits)
-        self.root = best
-        choice = best.selected_piece
-        
-        if self.debug:
-            print(f"MCTS 선택 피스: {MCTSNode._get_mbti_name(choice)} (방문: {best.visits}회, 승률: {best.wins/best.visits:.2f})")
-        
-        # 선택 기록
-        self.move_history.append(choice)
-        return choice
-
-    def place_piece(self, piece: Tuple[int,int,int,int]) -> Tuple[int,int]:
-        """주어진 피스를 보드에 배치"""
-        if self.debug:
-            print("\n===== 피스 배치 단계 =====")
-            print(f"배치할 피스: {MCTSNode._get_mbti_name(piece)}")
-        
-        # 1. 즉시 승리 가능한 위치 체크
-        for r, c in product(range(4), range(4)):
-            if self.board[r][c] == 0:
-                # 임시 배치
-                temp = [row.copy() for row in self.board]
-                temp[r][c] = MCTSNode._encode_piece(piece)
-                
-                # 승리 체크
-                if MCTSNode._check_win(temp):
-                    # 승리 위치 기록
-                    self.move_history.append((r, c))
-                    if self.debug:
-                        print(f"즉시 승리 위치 발견: ({r},{c})")
-                    return (r, c)
-
-        # 2. 양방 3목 기회 찾기
-        fork_opportunities = []
-        for r, c in product(range(4), range(4)):
-            if self.board[r][c] == 0:
-                if self._check_fork_opportunities((r, c), piece):
-                    fork_opportunities.append((r, c))
-                    
-        if fork_opportunities:
-            # 양방 3목 위치 중 중앙에 가까운 것 선택
-            choice = min(fork_opportunities, 
-                       key=lambda pos: abs(pos[0]-1.5) + abs(pos[1]-1.5))
-            
-            self.move_history.append(choice)
-            if self.debug:
-                print(f"양방 3목 기회 활용: {choice}")
-            return choice
-        
-        # 3. 위험한 위치 파악
-        danger_spots = []
-        for r, c in product(range(4), range(4)):
-            if self.board[r][c] == 0:
-                danger = self._danger_level((r, c), piece)
-                if danger > 2:  # 위험도 임계값
-                    danger_spots.append(((r, c), danger))
-        
-        # 위험도 순으로 정렬
-        danger_spots.sort(key=lambda x: x[1], reverse=True)
-        
-        if self.debug and danger_spots:
-            print("위험 위치:")
-            for (r, c), score in danger_spots[:3]:  # 상위 3개만 출력
-                print(f"  ({r},{c}): {score}")
-        
-        # 4. MCTS 탐색
-        self._search()
-        
-        # 5. 자식 노드가 없는 경우 (탐색 실패)
-        if not self.root.children:
-            if self.debug:
-                print("MCTS 탐색 실패, 안전한 위치 직접 선택")
-            
-            empties = [(r,c) for r,c in product(range(4), range(4)) 
-                      if self.board[r][c] == 0]
-
-            if not empties:
-                if self.debug:
-                    print("피스 배치 오류: MCTS 실패 후 둘 빈칸이 없습니다. 게임이 이미 종료되었어야 합니다.")
-                self.move_history.append((0,0)) 
-                return (0,0)
-
-            best_fallback_move = None
-            min_opponent_threat_score = float('inf')
-            # 'piece'는 P2가 P1에게 준, 현재 P1이 배치해야 할 말입니다.
-            encoded_current_piece = MCTSNode._encode_piece(piece) 
-
-            for r_idx, c_idx in empties:
-                current_spot_threat_score = 0.0 
-                
-                # P1이 (r_idx, c_idx)에 'piece'를 놓는다고 시뮬레이션
-                self.board[r_idx][c_idx] = encoded_current_piece 
-                board_key_after_my_move = tuple(tuple(r) for r in self.board)
-                
-                # 이제, P1이 이 위치에 말을 놓은 후, P1이 self.available_pieces에서 P2에게 말을 선택해 줄 차례입니다.
-                # P2가 그 말을 받아 최적으로 두었을 때의 위협을 평가합니다.
-                # 이 휴리스틱은 P1이 P2에게 줄 수 있는 모든 말에 대한 위협의 합계를 사용합니다.
-                if not self.available_pieces: # P1이 다음 select_piece 단계에서 P2에게 줄 말이 없는 경우
-                    pass # P1이 말을 주는 것으로부터 발생하는 추가 위협은 없음
-                else:
-                    # P1이 다음 턴에 P2에게 줄 수 있는 각 말에 대해...
-                    for piece_p1_might_give_to_p2 in self.available_pieces:
-                        # ...P2가 그 말을 받고 board_key_after_my_move 상태에서 최적으로 두었을 때의 위험은?
-                        risk = MCTSNode._opponent_can_win_cached(board_key_after_my_move, piece_p1_might_give_to_p2)
-                        if risk == 2:  # P2가 이 말을 받으면 포크를 만들 수 있음
-                            current_spot_threat_score += 10.0 # 매우 높은 위협도
-                        elif risk == 1:  # P2가 이 말을 받으면 승리할 수 있음
-                            current_spot_threat_score += 5.0 # 높은 위협도
-                
-                self.board[r_idx][c_idx] = 0 # 시뮬레이션 되돌리기: P1의 말 배치 취소
-                
-                # 중앙 선호도 휴리스틱 추가
-                centrality_penalty = (abs(r_idx - 1.5) + abs(c_idx - 1.5)) 
-                current_spot_threat_score += centrality_penalty * 0.1 # 중앙 가중치는 작게 설정
-
-                if current_spot_threat_score < min_opponent_threat_score:
-                    min_opponent_threat_score = current_spot_threat_score
-                    best_fallback_move = (r_idx, c_idx)
-                elif current_spot_threat_score == min_opponent_threat_score:
-                    # 점수가 같으면 중앙에 더 가까운 곳을 선호 (동점 처리)
-                    if best_fallback_move is None or \
-                       (abs(r_idx - 1.5) + abs(c_idx - 1.5)) < \
-                       (abs(best_fallback_move[0] - 1.5) + abs(best_fallback_move[1] - 1.5)):
-                        best_fallback_move = (r_idx, c_idx)
-            
-            # 모든 빈칸을 확인한 후
-            if best_fallback_move is not None:
-                choice = best_fallback_move
-            else:
-                # 이 경우는 empties가 비어있지 않다면 발생하기 어렵지만 (min_opponent_threat_score가 갱신되었을 것이므로),
-                # 안전장치로 empties가 있다면 그 중 가장 중앙을 선택합니다.
-                if empties: 
-                    if self.debug:
-                        print("MCTS 실패 후 모든 대체 위치가 매우 높은 위협도 (또는 로직 오류), 중앙 우선 선택")
-                    empties.sort(key=lambda pos: abs(pos[0]-1.5) + abs(pos[1]-1.5)) # 중앙 우선 정렬
-                    choice = empties[0]
-                else: 
-                    # 이 경우는 블록 시작 부분의 'if not empties:'에서 이미 처리되었어야 합니다.
-                    if self.debug:
-                        print("피스 배치 오류: MCTS 실패 분석 중 빈 칸 없음 (이중 확인). (0,0) 강제 반환.")
-                    choice = (0,0) 
-
-            self.move_history.append(choice)
-            if self.debug:
-                debug_score_str = f"{min_opponent_threat_score:.2f}" if best_fallback_move is not None and min_opponent_threat_score != float('inf') else 'N/A'
-                print(f"MCTS 실패 후 대체 선택 위치: {choice} (계산된 위협 점수: {debug_score_str})")
             return choice
         
         # 6. 최고의 자식 노드 사용
