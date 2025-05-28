@@ -90,11 +90,11 @@ class MCTSNode:
                     # 3개 같은 속성이 있고 1개 빈칸 - 높은 점수
                     if empty_count == 1:
                         if attr_counts[0] == 3 or attr_counts[1] == 3:
-                            score += 0.4
+                            score += 0.6  # Changed from 0.4
                     # 2개 같은 속성, 2개 빈칸 - 중간 점수
                     elif empty_count == 2:
                         if attr_counts[0] == 2 or attr_counts[1] == 2:
-                            score += 0.15
+                            score += 0.25  # Changed from 0.15
         
         # 3. 중앙 위치 가중치 (기본적인 전략)
         center_control = 0
@@ -511,7 +511,6 @@ class MCTSNode:
     def _get_mbti_name(piece: Tuple[int,int,int,int]) -> str:
         """피스를 MBTI 형식으로 표현"""
         return f"{'I' if piece[0] == 0 else 'E'}{'N' if piece[1] == 0 else 'S'}{'T' if piece[2] == 0 else 'F'}{'P' if piece[3] == 0 else 'J'}"
-
 
 class P1:
     """
