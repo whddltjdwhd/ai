@@ -655,60 +655,71 @@ class P1:
         start_time = time.time()
         end_time = start_time + self.MAX_TURN_TIME * 0.95  # 시간 제한의 95%만 사용
         iters = 0
-        future_results = []
         
-        # CPU 코어 수에 맞게 작업자 수 조정
-        num_workers = min(8, os.cpu_count() or 4)
-        batch_size = 16  # 배치 크기
+        # 병렬 처리 비활성화: 동시성 문제 해결을 위해 순차 실행으로 변경
+        # future_results = []
+        # num_workers = min(8, os.cpu_count() or 4)
+        # batch_size = 16
         
-        # 병렬 탐색 실행
-        with ThreadPoolExecutor(max_workers=num_workers) as executor:
-            while time.time() < end_time and iters < self.ITERATION_CAP:
-                # 배치로 작업 제출
-                new_futures = []
-                for _ in range(batch_size):
-                    if time.time() >= end_time or iters >= self.ITERATION_CAP:
-                        break
-                    new_futures.append(executor.submit(self._iterate))
+        # with ThreadPoolExecutor(max_workers=num_workers) as executor:
+        #     while time.time() < end_time and iters < self.ITERATION_CAP:
+        #         new_futures = []
+        #         for _ in range(batch_size):
+        #             if time.time() >= end_time or iters >= self.ITERATION_CAP:
+        #                 break
+        #             new_futures.append(executor.submit(self._iterate))
                 
-                future_results.extend(new_futures)
+        #         future_results.extend(new_futures)
                 
-                # 완료된 작업 확인
-                done, not_done = wait(
-                    future_results, 
-                    timeout=0.01, 
-                    return_when=FIRST_COMPLETED
-                )
+        #         done, not_done = wait(
+        #             future_results, 
+        #             timeout=0.01, 
+        #             return_when=FIRST_COMPLETED
+        #         )
                 
-                # 완료된 작업 처리
-                for future in done:
-                    future_results.remove(future)
-                    try:
-                        future.result()  # 예외 체크
-                        iters += 1
-                    except Exception as e:
-                        if self.debug:
-                            print(f"탐색 오류: {str(e)}")
+        #         for future in done:
+        #             future_results.remove(future)
+        #             try:
+        #                 future.result()  # 예외 체크
+        #                 iters += 1
+        #             except Exception as e:
+        #                 if self.debug:
+        #                     print(f"탐색 오류: {str(e)}")
                 
-                # 일정 간격으로 가장 유망한 자식 노드로 집중
-                if iters % 200 == 0 and self.root.children and iters > 0:
-                    best_children = sorted(
-                        self.root.children, 
-                        key=lambda c: c.visits, 
-                        reverse=True
-                    )[:3]  # 상위 3개 노드
+        #         # 일정 간격으로 가장 유망한 자식 노드로 집중 (현재 비활성화 상태 유지)
+        #         if iters % 200 == 0 and self.root.children and iters > 0:
+        #             best_children = sorted(
+        #                 self.root.children, 
+        #                 key=lambda c: c.visits, 
+        #                 reverse=True
+        #             )[:3]
                     
-                    if best_children and best_children[0].visits > self.root.visits * 0.4:
-                        if self.debug:
-                            print(f"탐색 집중: {best_children[0].visits}회 방문한 노드로 집중 (주석 처리로 비활성화됨)")
-                        # self.root = best_children[0] # <--- 이 라인을 주석 처리하여 비활성화
-                
+        #             if best_children and best_children[0].visits > self.root.visits * 0.4:
+        #                 if self.debug:
+        #                     print(f"탐색 집중: {best_children[0].visits}회 방문한 노드로 집중 (현재 비활성화됨)")
+        #                 # self.root = best_children[0] # <--- 비활성화 상태 유지
+
+        # 순차 실행 루프
+        while time.time() < end_time and iters < self.ITERATION_CAP:
+            try:
+                self._iterate()
+                iters += 1
+            except Exception as e:
+                if self.debug:
+                    print(f"탐색 오류 (순차 실행 중): {str(e)}")
+            
+            # 일정 간격으로 가장 유망한 자식 노드로 집중 (현재 비활성화 상태 유지)
+            # 이 로직은 병렬 처리와 별개이므로, 필요시 활성화 고려 가능 (단, 이전 이슈 재발 가능성 유의)
+            if iters % 200 == 0 and self.root.children and iters > 0:
+                # ... (탐색 집중 로직은 이전과 동일하게 주석 처리 또는 신중히 관리) ...
+                pass # 현재는 탐색 집중 로직 비활성화 유지
+
         # 탐색 통계 업데이트
         self.last_search_iterations = iters
         self.last_search_time = time.time() - start_time
         
         if self.debug:
-            print(f"MCTS 탐색 완료: {iters}회 반복, {self.last_search_time:.2f}초 소요")
+            print(f"MCTS 탐색 완료 (순차 실행): {iters}회 반복, {self.last_search_time:.2f}초 소요")
 
     def _analyze_opponent_trends(self) -> List[Tuple[Optional[int], float]]:
         """상대방 전략 경향 분석"""
