@@ -4,6 +4,33 @@ from functools import lru_cache
 import sys
 
 class P2:
+    _instance = None
+    _initialized = False
+
+    def __new__(cls, *args, **kwargs):
+        if cls._instance is None:
+            cls._instance = super(P2, cls).__new__(cls)
+        return cls._instance
+
+    def __init__(self, board: List[List[int]], available_pieces: List[Tuple[int,int,int,int]]):
+        if not self._initialized:
+            # 깊은 복사로 안전하게 초기 상태 저장
+            self.board = [row.copy() for row in board]
+            self.available_pieces = available_pieces.copy()
+            # 모든 16개 피스 조합 생성 및 인덱스 매핑
+            self.pieces = [(i,j,k,l) for i in range(2) for j in range(2) for k in range(2) for l in range(2)]
+            self.piece_to_index = {p: idx+1 for idx,p in enumerate(self.pieces)}
+            self.index_to_piece = {idx+1: p for idx,p in enumerate(self.pieces)}  # 인덱스로 피스 찾기 추가
+            self.minimax_depth = self._get_minimax_depth()  # 동적 깊이 설정
+            self.chosen_piece = None  # place_piece에서 결정된 '상대에게 줄 피스'를 저장할 변수
+            self.debug = True
+            self._initialized = True
+        else:
+            # 이미 초기화된 경우, 보드와 available_pieces만 업데이트
+            self.board = [row.copy() for row in board]
+            self.available_pieces = available_pieces.copy()
+            self.minimax_depth = self._get_minimax_depth()  # 깊이도 업데이트
+
     # 게임 평가 상수 (P2 관점)
     WIN_SCORE = 10000.0
     LOSE_SCORE = -10000.0
@@ -15,17 +42,19 @@ class P2:
     IMMEDIATE_WIN_BONUS = 1000.0  # 즉시 승리 기회
     THREE_IN_ROW_BONUS = 100.0  # 3목 기회
 
-    def __init__(self, board: List[List[int]], available_pieces: List[Tuple[int,int,int,int]]):
-        # 깊은 복사로 안전하게 초기 상태 저장
-        self.board = [row.copy() for row in board]
-        self.available_pieces = available_pieces.copy()
-        # 모든 16개 피스 조합 생성 및 인덱스 매핑
-        self.pieces = [(i,j,k,l) for i in range(2) for j in range(2) for k in range(2) for l in range(2)]
-        self.piece_to_index = {p: idx+1 for idx,p in enumerate(self.pieces)}
-        self.index_to_piece = {idx+1: p for idx,p in enumerate(self.pieces)}  # 인덱스로 피스 찾기 추가
-        self.minimax_depth = self._get_minimax_depth()  # 동적 깊이 설정
-        self.chosen_piece = None  # place_piece에서 결정된 '상대에게 줄 피스'를 저장할 변수
-        self.debug = True
+    # P2 관점의 위험도 상수 (높을수록 위험)
+    FORK_DANGER_SCORE = 1000.0        # 양방 3목 필승 위협
+    THREE_IN_ROW_DANGER = 100.0       # 단일 3목 위협
+    CENTER_DANGER = 20.0              # 중앙 위치에 P1 피스 놓을 위험
+    CORNER_DANGER = 10.0              # 코너 위치에 P1 피스 놓을 위험
+    OPPONENT_PIECE_ADVANTAGE_DANGER = 50.0  # 상대방에게 유리한 피스를 주는 위험
+    POTENTIAL_LINE_DANGER = 5.0       # 잠재적 라인 형성 위협
+    IMMEDIATE_WIN_DANGER = 2000.0     # 즉시 승리 위협
+    MATCHING_ATTRIBUTES_DANGER = 15.0  # 속성 일치 위협
+    CONSECUTIVE_THREAT_DANGER = 200.0  # 연속된 위협 위험도
+    BLOCK_FORK_DANGER = 750.0         # 2x2 블록 포크 위험도
+    CENTER_THREE_IN_ROW_DANGER = 150.0  # 중앙 위치 3목 위협
+    CORNER_THREE_IN_ROW_DANGER = 75.0  # 코너 위치 3목 위협
 
     def _get_minimax_depth(self) -> int:
         """
@@ -51,69 +80,106 @@ class P2:
         else:
             return 5  # 막바지에는 최대한 깊게 탐색
 
-    def _danger_score(self, board: Tuple[Tuple[int, ...], ...], current_available_pieces: Tuple[Tuple[int,int,int,int], ...], piece: Tuple[int,int,int,int]) -> float:
+    def _get_attribute_pattern_score(self, piece: Tuple[int, int, int, int]) -> float:
         """
-        주어진 피스가 상대방(P1)에게 얼마나 위험한지 점수를 계산합니다.
-        점수가 높을수록 P2에게는 위험한 피스 (즉, 상대에게는 좋은 피스)입니다.
-        이 함수는 P2가 P1에게 줄 피스를 선택할 때 활용됩니다.
-        
-        Args:
-            board: 현재 게임 보드 상태 (튜플 형태)
-            current_available_pieces: P2가 현재 가진 피스 목록 (튜플 형태)
-            piece: 평가할 피스
-        Returns:
-            float: 위험도 점수
+        피스의 속성 조합 패턴에 따른 점수 (P2 관점).
+        승리에 유리한 속성 조합에 높은 점수를 부여.
+        예: 특정 속성이 희귀하거나, 다른 피스와 조합하기 좋은 경우.
+        속성 가중치: 크기(0) > 모양(1) > 색깔(2) > 구멍(3)
         """
-        if self.debug:
-            sys.stdout.write(f"  [Danger] 피스 {self._binary_to_mbti(piece)}의 위험도 평가 시작...\n")
-            sys.stdout.flush()
-
         score = 0.0
+        # 각 속성별 가중치 (임의 지정, 실제 게임 플레이로 조정 필요)
+        attr_weights = [1.5, 1.2, 1.0, 0.8] # 크기, 모양, 색깔, 구멍
         
-        # 1. 즉시 승리 가능성 체크 (매우 높은 위험도)
-        for r, c in self._get_empty_positions(board):
-            if self._is_winning_move(board, r, c, piece):
-                if self.debug:
-                    sys.stdout.write(f"  [Danger] 즉시 승리 가능성 감지! Score: {self.IMMEDIATE_WIN_BONUS}\n")
-                    sys.stdout.flush()
-                return self.IMMEDIATE_WIN_BONUS
+        # 피스의 속성 값에 따라 점수 부여
+        # 예: 0, 0, 0, 0 (가장 일반적인 조합) -> 낮은 점수
+        #     1, 1, 1, 1 (가장 희귀한 조합) -> 높은 점수
+        for i in range(4):
+            score += piece[i] * attr_weights[i] # 속성 값이 1인 경우 가중치만큼 점수 추가
 
-        # 2. 양방 3목 가능성 체크 (높은 위험도)
+        # 특정 패턴에 대한 추가 보너스/페널티 (예시)
+        if piece.count(1) == 4: # 모든 속성이 1인 피스 (희귀)
+            score += 2.0
+        elif piece.count(0) == 4: # 모든 속성이 0인 피스 (희귀)
+            score += 2.0
+        elif piece[0] != piece[1] and piece[2] != piece[3]: # 특정 속성들이 서로 다른 패턴
+             score += 1.0
+
+        return score
+
+    def _danger_score(self, board: List[List[int]], piece: Tuple[int,int,int,int]) -> int:
+        """
+        해당 피스가 얼마나 위험한지 점수 계산 (P2의 관점: P1이 이 피스를 받았을 때)
+        Returns:
+            int: 점수가 높을수록 위험한 피스 (P1에게 유리한 피스)
+        """
+        score = 0
+        
+        # 1. P1이 이 피스로 즉시 승리할 수 있는지 체크 (최고 위험도)
+        for r in range(4):
+            for c in range(4):
+                if board[r][c] == 0:
+                    if self._is_winning_move(board, r, c, piece):
+                        score += self.WIN_SCORE # P1이 승리하면 매우 높은 위험
+                        return score # 즉시 반환 (더 이상 계산 불필요)
+
+        # 2. P1이 이 피스로 양방 3목 필승을 만들 수 있는지 체크 (높은 위험도)
         if self._is_unavoidable_fork(board, piece):
-            if self.debug:
-                sys.stdout.write(f"  [Danger] 양방 3목 가능성 감지! Score: {self.FORK_BONUS}\n")
-                sys.stdout.flush()
-            score += self.FORK_BONUS
+            score += self.FORK_DANGER_SCORE
+            
+        # 3. P1이 이 피스로 3목 기회를 얻을 수 있는지 체크 (중간 위험도)
+        # 위치에 따른 가중치 차등 적용
+        for r in range(4):
+            for c in range(4):
+                if board[r][c] == 0:
+                    matching_attributes = self._count_matching_attributes(board, r, c, piece)
+                    if matching_attributes >= 1:
+                        score += self.THREE_IN_ROW_DANGER * matching_attributes
+                        # 중앙/코너 위치에 따른 3목 위협 가중치
+                        if (r in [1, 2] and c in [1, 2]): # 중앙 4칸
+                            score += self.CENTER_THREE_IN_ROW_DANGER * matching_attributes
+                        elif (r in [0, 3] and c in [0, 3]): # 코너 4칸
+                            score += self.CORNER_THREE_IN_ROW_DANGER * matching_attributes
 
-        # 3. 3목 가능성 체크 (중간 위험도)
-        for r, c in self._get_empty_positions(board):
-            matching_lines = self._count_matching_attributes(board, r, c, piece)
-            if matching_lines >= 1:
-                score += self.THREE_IN_ROW_BONUS * matching_lines
-                if self.debug:
-                    sys.stdout.write(f"  [Danger] 위치 ({r},{c})에서 {matching_lines}개의 3목 가능성 감지! 현재 점수: {score}\n")
-                    sys.stdout.flush()
+        # 4. P1이 이 피스로 2x2 블록 포크 기회를 얻을 수 있는지 체크
+        for r in range(3):
+            for c in range(3):
+                # 해당 2x2 블록에 빈 칸이 있고 P1이 놓을 피스가 블록에 포함될 경우
+                current_block_indices = [board[r][c], board[r][c+1], board[r+1][c], board[r+1][c+1]]
+                if 0 in current_block_indices:
+                    # 가상으로 피스를 놓아보고 2x2 포크 기회 확인
+                    for br in [r, r+1]:
+                        for bc in [c, c+1]:
+                            if board[br][bc] == 0:
+                                temp_board = [row.copy() for row in board]
+                                temp_board[br][bc] = self.piece_to_index[piece]
+                                # P1이 해당 2x2 블록으로 4목을 만들 수 있는 기회가 2개 이상이면 포크
+                                block_fork_count = 0
+                                for attr_idx in range(4):
+                                    # 해당 2x2 블록에 놓았을 때 3개 이상의 같은 속성을 가진 피스가 두 가지 이상의 방식으로 생성되는지 확인
+                                    sub_block_pieces = [self.index_to_piece[idx] for idx in current_block_indices if idx != 0]
+                                    if len(sub_block_pieces) == 3:
+                                        if sum(1 for p in sub_block_pieces if p[attr_idx] == piece[attr_idx]) == 3:
+                                            block_fork_count += 1
+                
+                if block_fork_count >= 2:
+                    score += self.BLOCK_FORK_DANGER * block_fork_count
 
-        # 4. 중앙/코너 제어 가능성 체크
-        for r, c in [(1,1), (1,2), (2,1), (2,2)]:  # 중앙 위치
-            if board[r][c] == 0:  # 빈 칸인 경우
-                score += self.CENTER_BONUS * 0.5  # 중앙 제어 가능성에 대한 보너스
-        for r, c in [(0,0), (0,3), (3,0), (3,3)]:  # 코너 위치
-            if board[r][c] == 0:  # 빈 칸인 경우
-                score += self.CORNER_BONUS * 0.5  # 코너 제어 가능성에 대한 보너스
+        # 5. 연속된 위협 감지 및 평가
+        potential_threat_lines = 0
+        for r in range(4):
+            for c in range(4):
+                if board[r][c] == 0:
+                    temp_board = [row.copy() for row in board]
+                    temp_board[r][c] = self.piece_to_index[piece]
+                    if self._count_matching_attributes(temp_board, r, c, piece) >= 1:
+                        potential_threat_lines += 1
+        if potential_threat_lines >= 2: # 2개 이상의 잠재적 3목 라인 형성
+            score += self.CONSECUTIVE_THREAT_DANGER
 
-        # 5. 상대방의 남은 피스들과의 관계 평가
-        # 현재 피스와 상대방의 남은 피스들 간의 보완 관계를 평가
-        for other_piece in current_available_pieces:
-            if other_piece != piece:
-                # 두 피스가 3개 이상의 속성을 공유하는지 확인
-                matching_attrs = sum(1 for i in range(4) if piece[i] == other_piece[i])
-                if matching_attrs >= 3:
-                    score += self.MATCHING_ATTRIBUTES_BONUS * matching_attrs
-
-        if self.debug:
-            sys.stdout.write(f"  [Danger] 최종 위험도 점수: {score}\n")
-            sys.stdout.flush()
+        # 6. P1에게 유리한 속성 조합의 피스인지 평가 (속성 조합 패턴 평가)
+        score += self._get_attribute_pattern_score(piece) * self.OPPONENT_PIECE_ADVANTAGE_DANGER / 10 # 가중치 조절
+        
         return score
 
     def _binary_to_mbti(self, piece: Tuple[int,int,int,int]) -> str:
@@ -309,7 +375,6 @@ class P2:
                 for piece_candidate in remaining_pieces_for_giving_to_p1:
                     danger = self._danger_score(
                         tuple(tuple(r) for r in self.board),  # 현재 보드
-                        tuple(p for p in remaining_pieces_for_giving_to_p1 if p != piece_candidate),  # piece_candidate를 제외한 나머지 피스들
                         piece_candidate  # P1에게 줄 피스 후보
                     )
                     piece_danger_scores.append((danger, piece_candidate))
@@ -326,6 +391,9 @@ class P2:
             print(f"Minimax 선택 위치: {best_pos_to_place} (평가 점수: {eval_score:.2f})")
             print(f"다음 턴에 줄 피스: {self._binary_to_mbti(self.chosen_piece)}")
         
+        # 보드 상태 업데이트
+        self.board[best_pos_to_place[0]][best_pos_to_place[1]] = self.piece_to_index[selected_piece]
+        
         return best_pos_to_place
 
     def select_piece(self) -> Tuple[int,int,int,int]:
@@ -334,7 +402,7 @@ class P2:
         Returns:
             Tuple[int,int,int,int]: 상대에게 줄 최적의 피스
         """
-        print("\n===== [P1] 피스 선택 단계 =====")
+        print("\n===== [P2] 피스 선택 단계 =====")
         print(f"depth: {self.minimax_depth}")
         print(f"남은 피스: {len(self.available_pieces)}")
         
@@ -350,7 +418,7 @@ class P2:
             
             if safe_pieces:
                 # 위험도 점수 계산 및 정렬
-                piece_scores = [(p, self._danger_score(self.board, self.available_pieces, p)) for p in safe_pieces]
+                piece_scores = [(p, self._danger_score(self.board, p)) for p in safe_pieces]
                 piece_scores.sort(key=lambda x: x[1])
                 
                 print("\n안전한 피스 목록 (위험도 순):")
@@ -364,7 +432,7 @@ class P2:
             else:
                 # 모든 피스가 상대에게 즉시 승리 기회를 주는 경우 (최후의 선택)
                 print("\n⚠️ 모든 피스가 위험합니다. 최소 위험도 피스 선택:")
-                piece_scores = [(p, self._danger_score(self.board, self.available_pieces, p)) for p in self.available_pieces]
+                piece_scores = [(p, self._danger_score(self.board, p)) for p in self.available_pieces]
                 piece_scores.sort(key=lambda x: x[1])
                 
                 for piece, score in piece_scores[:3]:  # 상위 3개만 출력
@@ -823,7 +891,6 @@ class P2:
                         if len(block_pieces) >= 4:  # 4개 이상의 말이 있는 경우만 체크
                             for i in range(4):
                                 if len(set(p[i] for p in block_pieces)) == 1:
-                                    print(f"2x2블록 승리: ({r},{c})에 {self._binary_to_mbti(piece)} 놓으면 승리")
                                     return True
         
         return False
@@ -878,7 +945,9 @@ class P2:
 
     def _is_unavoidable_fork(self, board: List[List[int]], piece: Tuple[int,int,int,int]) -> bool:
         """
-        해당 피스를 놓으면 양방 3목 필승이 되는지 체크
+        해당 피스를 놓으면 양방 3목 필승이 되는지 체크 (P1의 관점)
+        Returns:
+            bool: True면 양방 3목 필승 가능
         """
         fork_count = 0
         for r in range(4):
@@ -886,9 +955,10 @@ class P2:
                 if board[r][c] == 0:
                     temp_board = [row.copy() for row in board]
                     temp_board[r][c] = self.piece_to_index[piece]
+                    # P1이 이 피스를 놓았을 때 3목이 되는 라인의 수
                     if self._count_matching_attributes(temp_board, r, c, piece) >= 3:
                         fork_count += 1
-        return fork_count >= 2
+        return fork_count >= 2  # 두 줄 이상이 3목이 됨
 
     def _has_fork_opportunity(self, board: List[List[int]], available_pieces: List[Tuple[int,int,int,int]], piece: Tuple[int,int,int,int], pos: Tuple[int,int]) -> bool:
         """
@@ -925,7 +995,6 @@ class P2:
             float: 평가 점수
         """
         if self.debug:
-            sys.stdout.write(f"  [Evaluate] 보드 상태 평가 시작...\n")
             sys.stdout.flush()
 
         # 1. 게임 종료 조건 확인 (가장 높은/낮은 우선순위)
@@ -933,7 +1002,6 @@ class P2:
         if any(self._is_winning_move(list(map(list, board)), r, c, self.index_to_piece[board[r][c]]) 
                for r in range(4) for c in range(4) if board[r][c] != 0 and board[r][c] % 2 == 0):  # P2의 피스
             if self.debug:
-                sys.stdout.write(f"  [Evaluate] P2 승리 감지! Score: {self.WIN_SCORE}\n")
                 sys.stdout.flush()
             return self.WIN_SCORE
         
@@ -941,14 +1009,12 @@ class P2:
         if any(self._is_winning_move(list(map(list, board)), r, c, self.index_to_piece[board[r][c]]) 
                for r in range(4) for c in range(4) if board[r][c] != 0 and board[r][c] % 2 != 0):  # P1의 피스
             if self.debug:
-                sys.stdout.write(f"  [Evaluate] P1 승리 감지! Score: {self.LOSE_SCORE}\n")
                 sys.stdout.flush()
             return self.LOSE_SCORE
         
         # 무승부 (보드가 꽉 찼고 승리 조건 없음)
         if all(cell != 0 for row in board for cell in row):
             if self.debug:
-                sys.stdout.write(f"  [Evaluate] 무승부 감지! Score: {self.DRAW_SCORE}\n")
                 sys.stdout.flush()
             return self.DRAW_SCORE
 
@@ -973,7 +1039,6 @@ class P2:
             # P2가 놓을 수 있는 피스들로 이 위치에 놓았을 때의 잠재력
             for piece in self.available_pieces:
                 if self.debug:
-                    sys.stdout.write(f"  [Evaluate] 위치 ({r},{c}), 피스 {self._binary_to_mbti(piece)} (idx {self.piece_to_index[piece]}) 에 대한 잠재적 라인 계산...\n")
                     sys.stdout.flush()
                 
                 # 즉시 승리 가능성
@@ -991,7 +1056,6 @@ class P2:
                     score += self.FORK_BONUS
 
         if self.debug:
-            sys.stdout.write(f"  [Evaluate] 최종 평가 점수: {score}\n")
             sys.stdout.flush()
         return score
 
