@@ -315,6 +315,13 @@ class P2:
         print(f"depth: {self.minimax_depth}")
         print(f"배치할 피스 (P1이 준 피스): {self._binary_to_mbti(selected_piece)}")
         
+        # available_pieces에서 selected_piece 제거 (main.py 동기화)
+        if selected_piece in self.available_pieces:
+            self.available_pieces.remove(selected_piece)
+            print(f"available_pieces에서 {self._binary_to_mbti(selected_piece)} 제거됨")
+        else:
+            print(f"⚠️ Warning: {self._binary_to_mbti(selected_piece)}가 available_pieces에 없음")
+        
         self.minimax_depth = self._get_minimax_depth()  # 매 턴마다 깊이 업데이트
         print(f"현재 Minimax 깊이: {self.minimax_depth}")
         
@@ -1070,15 +1077,9 @@ class P2:
         if not hasattr(self, 'chosen_piece') or self.chosen_piece is None:
             print("⚠️ Warning: chosen_piece가 설정되지 않았습니다. 기본값 반환.")
             return (0,0,0,0)
-        
         print(f"\n===== [P2] 선택한 피스 반환 =====")
         print(f"선택한 피스: {self._binary_to_mbti(self.chosen_piece)}")
         
-        # 선택한 피스를 available_pieces에서 제거
-        if self.chosen_piece in self.available_pieces:
-            self.available_pieces.remove(self.chosen_piece)
-            print(f"남은 피스 수: {len(self.available_pieces)}")
-        else:
-            print("⚠️ Warning: 선택한 피스가 available_pieces에 없습니다.")
+        # main.py에서 available_pieces 관리를 담당하므로 여기서는 제거하지 않음
         
         return self.chosen_piece
