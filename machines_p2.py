@@ -7,7 +7,6 @@ class P2:
     LOSE_SCORE = -10000.0
     DRAW_SCORE = 0.0
     FORK_BONUS = 500.0  # 양방 3목 기회
-    MATCHING_ATTRIBUTES_BONUS = 10.0  # 3개 속성 일치 라인 하나당 보너스
     CENTER_BONUS = 20.0  # 중앙 위치 보너스
     CORNER_BONUS = 10.0  # 코너 위치 보너스
     IMMEDIATE_WIN_BONUS = 1000.0  # 즉시 승리 기회
@@ -16,7 +15,6 @@ class P2:
     # P2 관점의 위험도 상수 (높을수록 위험)
     FORK_DANGER_SCORE = 1000.0        # 양방 3목 필승 위협
     THREE_IN_ROW_DANGER = 100.0       # 단일 3목 위협
-    OPPONENT_PIECE_ADVANTAGE_DANGER = 50.0  # 상대방에게 유리한 피스를 주는 위험
     CONSECUTIVE_THREAT_DANGER = 200.0  # 연속된 위협 위험도
     BLOCK_FORK_DANGER = 750.0         # 2x2 블록 포크 위험도
     CENTER_THREE_IN_ROW_DANGER = 150.0  # 중앙 위치 3목 위협
@@ -32,7 +30,6 @@ class P2:
         self.piece_to_index = {p: idx+1 for idx,p in enumerate(self.pieces)}
         self.index_to_piece = {idx+1: p for idx,p in enumerate(self.pieces)}  # 인덱스로 피스 찾기 추가
         self.minimax_depth = self._get_minimax_depth()  # 동적 깊이 설정
-        self.chosen_piece = None  # place_piece에서 결정된 '상대에게 줄 피스'를 저장할 변수
 
     def _get_minimax_depth(self) -> int:
         """
@@ -152,7 +149,7 @@ class P2:
         self._evaluate_game_state.cache_clear()
         
         # Minimax 호출 (P2는 항상 후공이므로 is_maximizing_player=False)
-        eval_score, _, best_pos_to_place = self.minimax(
+        _, _, best_pos_to_place = self.minimax(
             tuple(tuple(r) for r in self.board),  # 현재 보드 상태 (튜플)
             selected_piece,  # P2가 놓을 피스 (P1이 P2에게 준 피스)
             tuple(self.available_pieces),  # P2가 P1에게 줄 수 있는 피스 목록
@@ -193,12 +190,11 @@ class P2:
         """
         
         self.minimax_depth = self._get_minimax_depth()  # 매 턴마다 깊이 업데이트
-        # Minimax 호출 전에 캐시 초기화
         self.minimax.cache_clear()
         self._evaluate_game_state.cache_clear()
         
         # Minimax 호출 (P2는 항상 후공이므로 is_maximizing_player=False)
-        eval_score, best_piece_to_give, _ = self.minimax(
+        _, best_piece_to_give, _ = self.minimax(
             tuple(tuple(r) for r in self.board),  # 현재 보드 상태 (튜플)
             None,  # 현재 턴에는 놓을 피스가 없음
             tuple(self.available_pieces),  # P2가 P1에게 줄 수 있는 피스 목록
